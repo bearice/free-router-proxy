@@ -20,6 +20,15 @@ import {
   rememberSignaturesFromPayload,
 } from './thought-signature.mjs';
 import { displayPath, maskSecret, validateSecret } from './ui.mjs';
+import { hashPassword, isPasswordHash, verifyPassword } from './auth.mjs';
+import {
+  addMissingKeys,
+  buildLiveConfig,
+  deepMerge,
+  defaultConfigObject,
+  runOverlayMigrations,
+  SCHEMA_VERSION,
+} from './config.mjs';
 
 const PACKAGE_VERSION = JSON.parse(
   fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8'),
@@ -93,11 +102,11 @@ assert.equal(normalizeCatalogPayload({ weird: true }).shape, 'unknown');
 
 // `generateContent` is necessary but not sufficient: Google serves images,
 // speech, and music through the same method, so the exclusion patterns in
-// config.json carry the rest. These are the real IDs the live listing returns.
+// the default config carry the rest. These are the real IDs the live listing returns.
 {
-  const patterns = JSON.parse(
-    fs.readFileSync(new URL('config.json', import.meta.url), 'utf8'),
-  ).discovery.exclude.modelPatterns.map((source) => new RegExp(source, 'i'));
+  const patterns = defaultConfigObject().discovery.exclude.modelPatterns.map(
+    (source) => new RegExp(source, 'i'),
+  );
   const excluded = (id) => patterns.some((pattern) => pattern.test(`gemini:${id}`));
 
   for (const id of [
@@ -247,6 +256,69 @@ assert.equal(maskSecret('sk-or-v1-0123456789abcdef'), 'sk-or********cdef (25)');
 assert.equal(maskSecret('sk-or-v1-0123456789abcdef').includes('0123456789'), false);
 assert.match(validateSecret('ok\nNODE_OPTIONS=x'), /newline/);
 assert.equal(validateSecret('sk-normal-key'), '');
+
+// Salted scrypt storage: hash shape, round trip, wrong password, legacy
+// plaintext comparison, and malformed hashes that must fail closed.
+{
+  const hashed = hashPassword('unit-test-pw');
+  assert.equal(isPasswordHash(hashed), true);
+  assert.equal(isPasswordHash('plain'), false);
+  assert.equal(isPasswordHash(''), false);
+  assert.equal(verifyPassword('unit-test-pw', hashed), true);
+  assert.equal(verifyPassword('wrong', hashed), false);
+  assert.equal(verifyPassword('plain', 'plain'), true);
+  assert.equal(verifyPassword('other', 'plain'), false);
+  assert.equal(verifyPassword('x', '$scrypt$broken'), false);
+  assert.equal(verifyPassword('x', '$scrypt$N=16384$r=8$p=1$zz$zz'), false);
+  assert.notEqual(hashPassword('same'), hashPassword('same'));
+}
+
+// Layered config: base defaults + sparse overlay, tombstones for deletions,
+// additive-only schema migrations.
+{
+  const base = {
+    host: '127.0.0.1',
+    nested: { keep: 1, overrideMe: 'base' },
+    list: ['a', 'b'],
+    routes: { r1: ['x'], r2: ['y'] },
+    providers: { p1: { baseUrl: 'https://a', freeModels: ['m'] } },
+  };
+  // Overlay wins per key; arrays replace wholesale; base-only branches are
+  // cloned so mutating the live view never touches base objects.
+  const merged = deepMerge(base, { nested: { overrideMe: 'user' }, list: ['c'] });
+  assert.deepEqual(merged, {
+    host: '127.0.0.1',
+    nested: { keep: 1, overrideMe: 'user' },
+    list: ['c'],
+    routes: { r1: ['x'], r2: ['y'] },
+    providers: { p1: { baseUrl: 'https://a', freeModels: ['m'] } },
+  });
+  merged.nested.keep = 99;
+  merged.providers.p1.freeModels.push('zzz');
+  assert.equal(base.nested.keep, 1);
+  assert.deepEqual(base.providers.p1.freeModels, ['m']);
+  // Tombstones keep operator deletions sticky across restarts.
+  const live = buildLiveConfig(base, {
+    routes: { r3: ['z'] },
+    _removedRoutes: ['r1'],
+    _removedProviders: ['p1'],
+  });
+  assert.deepEqual(Object.keys(live.routes).sort(), ['r2', 'r3']);
+  assert.deepEqual(live.providers, {});
+  // Schema migrations only add missing skeleton keys, never overwrite.
+  const overlay = { custom: 'mine', nested: { overrideMe: 'user' } };
+  assert.equal(runOverlayMigrations(overlay), true);
+  assert.equal(overlay._schemaVersion, SCHEMA_VERSION);
+  assert.equal(
+    runOverlayMigrations(overlay),
+    false,
+    'second run is a no-op',
+  );
+  const target = { a: 1, nested: { x: 1 } };
+  assert.equal(addMissingKeys(target, { a: 2, b: 3, nested: { x: 2, y: 4 } }), true);
+  assert.deepEqual(target, { a: 1, b: 3, nested: { x: 1, y: 4 } });
+  assert.equal(addMissingKeys(target, { a: 1, b: 3, nested: { x: 1, y: 4 } }), false);
+}
 
 assert.equal(providerNeedsThoughtSignatures({ name: 'gemini', baseUrl: 'http://127.0.0.1' }), true);
 assert.equal(
@@ -1467,29 +1539,59 @@ try {
   const pageScript = pageHtml.split('<script>')[1]?.split('</script>')[0];
   assert.ok(pageScript);
   new Function(pageScript);
+  // The page script is embedded in a JS template literal: a single-backslash
+  // regex like /\{(\w+)\}/ would be cooked into /{(w+)}/ and silently break
+  // every {var} interpolation. Assert the served bytes kept the backslashes.
+  assert.ok(pageHtml.includes('\\{(\\w+)\\}'));
 
   const uiState = await fetch(`${base}/api/state`).then((res) => res.json());
-  const uiProviders = new Map(uiState.providers.map((entry) => [entry.name, entry]));
+  assert.equal(uiState.error?.type, 'unauthorized');
+  // Web UI management APIs require the admin session (default password).
+  const loginResponse = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'admin123' }),
+  });
+  assert.equal(loginResponse.status, 200);
+  const sessionCookie = String(loginResponse.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(sessionCookie, /fr_session=/);
+  const badLogin = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'wrong' }),
+  });
+  assert.equal(badLogin.status, 401);
+  const uiHeaders = {
+    'Content-Type': 'application/json',
+    Cookie: sessionCookie,
+    'Sec-Fetch-Site': 'same-origin',
+  };
+  const authedState = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) =>
+    res.json(),
+  );
+  assert.equal(authedState.gateway.requireAuth, false);
+  assert.deepEqual(authedState.gateway.keys, []);
+  const uiProviders = new Map(authedState.providers.map((entry) => [entry.name, entry]));
   assert.equal(uiProviders.get('bai').configured, true);
   // Gemini is listed first when present; this test config has no gemini, so the
   // first row stays whoever was declared first.
-  if (uiProviders.has('gemini')) assert.equal(uiState.providers[0].name, 'gemini');
+  if (uiProviders.has('gemini')) assert.equal(authedState.providers[0].name, 'gemini');
   assert.equal(uiProviders.get('bai').keyEnv, 'BAI_API_KEY');
   // The real key must never leave the process, only a recognisable stub.
   assert.equal(uiProviders.get('bai').maskedKey.includes('bai-test-key'), false);
-  assert.equal(JSON.stringify(uiState).includes('bai-test-key'), false);
-  assert.ok(uiState.usage.models.length > 0);
-  assert.ok(uiState.routes.length > 0);
+  assert.equal(JSON.stringify(authedState).includes('bai-test-key'), false);
+  assert.ok(authedState.usage.models.length > 0);
+  assert.ok(authedState.routes.length > 0);
 
   // The interface warns about a rejection only when it contradicts config.json.
   // quotamock:no-free-tier was written into the route by hand, so its refusal is
   // worth surfacing; bai's glm-5.3-paid was merely a probe candidate, and
   // listing every one of those would bury the case that needs attention.
   assert.deepEqual(
-    uiState.excludedByProvider.map((entry) => entry.key),
+    authedState.excludedByProvider.map((entry) => entry.key),
     ['quotamock:no-free-tier'],
   );
-  assert.match(uiState.excludedByProvider[0].reason, /no free-tier allowance/);
+  assert.match(authedState.excludedByProvider[0].reason, /no free-tier allowance/);
   // Still recorded in full for diagnosis, just not shown as a warning.
   const fullVerdicts = await (await fetch(`${base}/health`)).json();
   assert.equal(fullVerdicts.discovery.modelVerdicts['bai:models/glm-5.3-paid'].free, false);
@@ -1530,13 +1632,13 @@ try {
   // Only known providers, so the env file cannot gain arbitrary variables.
   const unknownProvider = await fetch(`${base}/api/keys`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: uiHeaders,
     body: JSON.stringify({ provider: 'NODE_OPTIONS', key: '--require /tmp/evil.js' }),
   });
   assert.equal(unknownProvider.status, 400);
   const newlineInjection = await fetch(`${base}/api/keys`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: uiHeaders,
     body: JSON.stringify({ provider: 'bai', key: 'ok\nNODE_OPTIONS=--require /tmp/evil.js' }),
   });
   assert.equal(newlineInjection.status, 400);
@@ -1546,7 +1648,7 @@ try {
 
   const saved = await fetch(`${base}/api/keys`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' },
+    headers: uiHeaders,
     body: JSON.stringify({ provider: 'bai', key: 'bai-rotated-key' }),
   });
   assert.equal(saved.status, 200);
@@ -1570,16 +1672,208 @@ try {
 
   const cleared = await fetch(`${base}/api/keys`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: uiHeaders,
     body: JSON.stringify({ provider: 'bai', key: '' }),
   });
   assert.equal(cleared.status, 200);
   assert.equal(fs.readFileSync(envPath, 'utf8'), '');
-  const afterClear = await fetch(`${base}/api/state`).then((res) => res.json());
+  const afterClear = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
   assert.equal(
     afterClear.providers.find((entry) => entry.name === 'bai').configured,
     false,
   );
+
+  // Editable-config endpoints: routes, limits, discovery, settings, providers.
+  assert.ok(afterClear.editable);
+  assert.ok(afterClear.allRoutes['test-route']);
+  const saveRoute = await fetch(`${base}/api/routes`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'save', route: 'smoke-tmp', models: ['mock-a', 'tokenrouter:z-ai/glm-5.3-free'] }),
+  });
+  assert.equal(saveRoute.status, 200);
+  const withRoute = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
+  assert.deepEqual(withRoute.editable.routes['smoke-tmp'], ['mock-a', 'tokenrouter:z-ai/glm-5.3-free']);
+  const badRoute = await fetch(`${base}/api/routes`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'save', route: 'smoke-tmp', models: ['tokenrouter:'] }),
+  });
+  assert.equal(badRoute.status, 400);
+  const delRoute = await fetch(`${base}/api/routes`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'delete', route: 'smoke-tmp' }),
+  });
+  assert.equal(delRoute.status, 200);
+
+  const setLimit = await fetch(`${base}/api/limits`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'set', key: 'smoke:model', limit: 7 }),
+  });
+  assert.equal(setLimit.status, 200);
+  const withLimit = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
+  assert.equal(withLimit.editable.limits.find((entry) => entry.key === 'smoke:model')?.limit, 7);
+  const delLimit = await fetch(`${base}/api/limits`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'delete', key: 'smoke:model' }),
+  });
+  assert.equal(delLimit.status, 200);
+
+  const discOff = await fetch(`${base}/api/discovery`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ enabled: false, evaluationEnabled: false, pin: 'smoke:pinned' }),
+  });
+  assert.equal(discOff.status, 200);
+  const discState = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
+  assert.equal(discState.editable.discovery.enabled, false);
+  assert.equal(discState.editable.discovery.evaluationEnabled, false);
+  assert.ok(discState.editable.discovery.pinnedModels.includes('smoke:pinned'));
+  const discOn = await fetch(`${base}/api/discovery`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ enabled: true, evaluationEnabled: true, unpin: 'smoke:pinned' }),
+  });
+  assert.equal(discOn.status, 200);
+
+  const settings = await fetch(`${base}/api/settings`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ attemptTimeoutMs: 6000, redactSecrets: true }),
+  });
+  assert.equal(settings.status, 200);
+  const settingsState = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
+  assert.equal(settingsState.editable.general.attemptTimeoutMs, 6000);
+
+  const addProv = await fetch(`${base}/api/providers`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'create', name: 'smokeprov', baseUrl: 'http://127.0.0.1:1/v1', freeModels: ['smoke-1'] }),
+  });
+  assert.equal(addProv.status, 200);
+  const dupProv = await fetch(`${base}/api/providers`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'create', name: 'smokeprov', baseUrl: 'http://127.0.0.1:1/v1' }),
+  });
+  assert.equal(dupProv.status, 400);
+  const delProv = await fetch(`${base}/api/providers`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'delete', name: 'smokeprov' }),
+  });
+  assert.equal(delProv.status, 200);
+  const noDefDel = await fetch(`${base}/api/providers`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ action: 'delete', name: 'openrouter' }),
+  });
+  assert.equal(noDefDel.status, 400);
+
+  // Session TTL, free-model counts, env migration record, logout.
+  const ttlBad = await fetch(`${base}/api/settings`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ sessionTtlHours: -1 }),
+  });
+  assert.equal(ttlBad.status, 400);
+  const ttlSet = await fetch(`${base}/api/settings`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ sessionTtlHours: 48 }),
+  });
+  assert.equal(ttlSet.status, 200);
+  const ttlState = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
+  assert.equal(ttlState.webui.sessionTtlHours, 48);
+  assert.ok(ttlState.webui.sessionExpiresAt);
+  const ttlNever = await fetch(`${base}/api/settings`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ sessionTtlHours: 0 }),
+  });
+  assert.equal(ttlNever.status, 200);
+
+  const counts = new Map(ttlState.providers.map((entry) => [entry.name, entry]));
+  assert.equal(counts.get('extra').modelCount, 1);
+  assert.equal(counts.get('extra').freeCount, 1);
+  assert.equal(counts.get('bai').modelCount, 2);
+  // bai's key was cleared above, so withdrawals cannot be checked and every
+  // allowlisted model counts as available.
+  assert.equal(counts.get('bai').freeCount, 2);
+  assert.deepEqual(ttlState.migration.providers, {});
+
+  // Password change persists a salted hash (never plaintext); the old
+  // password stops working and the new one issues a fresh session.
+  const pwChange = await fetch(`${base}/api/webui-password`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ password: 's3cret-newpw' }),
+  });
+  assert.equal(pwChange.status, 200);
+  // The hash lands in the overlay file; the tracked base config is untouched.
+  const overlayPath = path.join(tempDir, 'config.local.json');
+  const persistedOverlay = fs.readFileSync(overlayPath, 'utf8');
+  assert.match(persistedOverlay, /\$scrypt\$/);
+  assert.equal(persistedOverlay.includes('s3cret-newpw'), false);
+  const persistedBase = fs.readFileSync(testConfig, 'utf8');
+  assert.equal(persistedBase.includes('$scrypt$'), false);
+  assert.equal(persistedBase.includes('s3cret-newpw'), false);
+  const staleLogin = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'admin123' }),
+  });
+  assert.equal(staleLogin.status, 401);
+  const freshLogin = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 's3cret-newpw' }),
+  });
+  assert.equal(freshLogin.status, 200);
+  const freshCookie = String(freshLogin.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(freshCookie, /fr_session=/);
+  const freshState = await fetch(`${base}/api/state`, { headers: { Cookie: freshCookie } }).then((res) =>
+    res.json(),
+  );
+  assert.equal(freshState.webui.defaultPassword, false);
+
+  const logout = await fetch(`${base}/api/logout`, {
+    method: 'POST',
+    headers: { Cookie: freshCookie },
+  });
+  assert.equal(logout.status, 200);
+  const afterLogout = await fetch(`${base}/api/state`, { headers: { Cookie: freshCookie } });
+  assert.equal(afterLogout.status, 401);
+
+  // Restart must be last: the server exits and stops answering. Re-login
+  // first since the password change above revoked all sessions.
+  const relogin = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 's3cret-newpw' }),
+  });
+  assert.equal(relogin.status, 200);
+  const restartCookie = String(relogin.headers.get('set-cookie') || '').split(';')[0];
+  const restart = await fetch(`${base}/api/restart`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: restartCookie },
+  });
+  assert.equal(restart.status, 200);
+  assert.equal((await restart.json()).ok, true);
+  let wentAway = false;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
+    } catch {
+      wentAway = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(wentAway, true, 'server did not exit after /api/restart');
 
   console.log(
     'smoke test passed: pluggable providers, ranking, fallback, discovery, usage counters, and tracking work',

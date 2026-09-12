@@ -1,10 +1,24 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  buildLiveConfig,
+  defaultConfigPath,
+  ensureConfigFile,
+  isPlainObject,
+  loadConfigFile,
+  loadOverlayFile,
+  OVERLAY_FILENAME,
+  resolveConfigPaths,
+  runOverlayMigrations,
+  saveOverlayFile,
+} from './config.mjs';
+import { hashPassword, isPasswordHash, verifyPassword } from './auth.mjs';
 import {
   createProviderRegistry,
   isChatModel,
@@ -53,8 +67,87 @@ for (const file of envCandidates) {
   if (file) loadEnvFile(file);
 }
 
-const CONFIG_PATH = process.env.FREE_ROUTER_CONFIG || path.join(HERE, 'config.json');
-const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+const CONFIG_PATH = process.env.FREE_ROUTER_CONFIG || defaultConfigPath(HERE);
+const { overlayPath: OVERLAY_PATH } = resolveConfigPaths(HERE, process.env.FREE_ROUTER_CONFIG);
+try {
+  // Docker creates a directory for a volume-mounted file that does not exist
+  // on the host yet; replace it with a real default config instead of
+  // crashing on read.
+  if (fs.existsSync(CONFIG_PATH) && fs.statSync(CONFIG_PATH).isDirectory()) {
+    fs.rmSync(CONFIG_PATH, { recursive: true, force: true });
+  }
+} catch {
+  // Fall through to the normal load path, which reports the problem.
+}
+if (ensureConfigFile(CONFIG_PATH)) {
+  console.log(`[${new Date().toISOString()}] wrote default config to ${CONFIG_PATH}; set keys in the web UI`);
+}
+// Layered config: config.json (tracked defaults) + config.local.json
+// (gitignored operator overlay). The live view merges both; only the
+// overlay file is ever written back, so the base stays merge-clean.
+const { config: baseConfig, format: CONFIG_FORMAT } = loadConfigFile(CONFIG_PATH);
+const overlayLoaded = loadOverlayFile(OVERLAY_PATH);
+let overlay = overlayLoaded.overlay;
+if (overlayLoaded.error) {
+  log(`ignoring unreadable overlay ${displayPath(OVERLAY_PATH)}: ${overlayLoaded.error}`);
+}
+if (runOverlayMigrations(overlay)) persistOverlayFile();
+const config = buildLiveConfig(baseConfig, overlay);
+// Live-view-only normalization (memory, never persisted): the overlay file
+// stays sparse until a real mutation lands through the helpers below.
+if (!isPlainObject(config.webui)) config.webui = {};
+if (!isPlainObject(config.gateway)) config.gateway = {};
+if (!Array.isArray(config.gateway.keys)) config.gateway = { ...config.gateway, keys: [] };
+// Write helpers below always target the overlay object, so a base-owned
+// subtree is materialized there on first write (copy-on-write) and the base
+// file is never touched at runtime.
+function overlayParent(path) {
+  let overlayNode = overlay;
+  let liveNode = config;
+  for (const key of path.slice(0, -1)) {
+    if (!isPlainObject(overlayNode[key])) overlayNode[key] = {};
+    if (!isPlainObject(liveNode[key])) liveNode[key] = {};
+    overlayNode = overlayNode[key];
+    liveNode = liveNode[key];
+  }
+  return [overlayNode, liveNode];
+}
+function setOverlayValue(path, value) {
+  const [overlayNode, liveNode] = overlayParent(path);
+  const leaf = path[path.length - 1];
+  overlayNode[leaf] = value;
+  liveNode[leaf] = value;
+}
+function deleteOverlayValue(path) {
+  const [overlayNode, liveNode] = overlayParent(path);
+  const leaf = path[path.length - 1];
+  delete overlayNode[leaf];
+  delete liveNode[leaf];
+}
+// Provider raw blocks need whole-object ownership (nested partial updates
+// like freeModels/baseUrl must not orphan sibling keys from the live view).
+function editableProviderRaw(name) {
+  overlay.providers ||= {};
+  if (!isPlainObject(overlay.providers[name])) {
+    overlay.providers[name] = structuredClone(config.providers?.[name] || {});
+  }
+  const raw = overlay.providers[name];
+  const provider = PROVIDERS.get(name);
+  if (provider) provider.configRef = raw;
+  config.providers ||= {};
+  config.providers[name] = raw;
+  return raw;
+}
+function persistOverlayFile() {
+  saveOverlayFile(OVERLAY_PATH, overlay);
+}
+function tombstone(listKey, name, present) {
+  if (!Array.isArray(overlay[listKey])) overlay[listKey] = [];
+  const key = String(name);
+  const index = overlay[listKey].indexOf(key);
+  if (present && index < 0) overlay[listKey].push(key);
+  if (!present && index >= 0) overlay[listKey].splice(index, 1);
+}
 installUpstreamProxy(
   (message) => {
     console.log(`[${new Date().toISOString()}]`, message);
@@ -63,14 +156,14 @@ installUpstreamProxy(
 );
 const HOST = process.env.FREE_ROUTER_HOST || config.host || '127.0.0.1';
 const PORT = Number(process.env.FREE_ROUTER_PORT || config.port || 8787);
-const ATTEMPT_TIMEOUT_MS = Number(
+let attemptTimeoutMs = Number(
   process.env.FREE_ROUTER_ATTEMPT_TIMEOUT_MS || config.attemptTimeoutMs || 180000,
 );
-const CATALOG_REFRESH_MS = Number(config.catalogRefreshMs || 900000);
+let catalogRefreshMs = Number(config.catalogRefreshMs || 900000);
 const registry = createProviderRegistry(config, { host: HOST, port: PORT });
 const PROVIDERS = registry.providers;
 const discoveryConfig = config.discovery || {};
-const DISCOVERY_ENABLED = discoveryConfig.enabled !== false;
+let discoveryEnabled = discoveryConfig.enabled !== false;
 const DISCOVERY_INTERVAL_MS = Number(discoveryConfig.intervalMs || 7 * 24 * 60 * 60 * 1000);
 const DISCOVERY_ROUTE = String(discoveryConfig.route || 'free-best');
 // How long a "not free" verdict stands before the model is worth asking again.
@@ -95,7 +188,7 @@ const excludeConfig = discoveryConfig.exclude || {};
 const EXCLUDE_MODEL_PATTERNS = compilePatterns(excludeConfig.modelPatterns, 'exclude.modelPatterns');
 const EXCLUDE_TEXT_PATTERNS = compilePatterns(excludeConfig.textPatterns, 'exclude.textPatterns');
 const evaluationConfig = discoveryConfig.evaluation || {};
-const EVALUATION_ENABLED = evaluationConfig.enabled !== false;
+let evaluationEnabled = evaluationConfig.enabled !== false;
 const EVALUATION_MAX_TOKENS = Number(evaluationConfig.maxTokens || 4000);
 // Bumped whenever the benchmark or its weights change, so stored scores from an
 // older scale get recomputed instead of being compared against new ones.
@@ -135,16 +228,256 @@ const USAGE_DAY_FORMATTER = (() => {
     return null;
   }
 })();
-const uiConfig = config.ui || {};
+const uiConfig = config.webui || config.ui || {};
 const UI_ENABLED = uiConfig.enabled !== false;
 const UI_ENV_PATH = path.resolve(path.dirname(CONFIG_PATH), uiConfig.envFile || '.env');
-let secretRedactor = config.redactSecrets === false ? null : createSecretRedactor();
+// Web UI single admin password (default "admin123"). Stored as a salted
+// scrypt hash; legacy plaintext values are upgraded on boot and on login.
+// Env override wins so a locked-out operator can recover without editing
+// the config file.
+const storedWebuiPassword = () => String(uiConfig.password || config.ui?.password || 'admin123');
 
-// The redactor snapshots process.env at build time, so a key added through the
-// UI would otherwise never be stripped from upstream payloads.
+// Whether the effective password is still the default. Memoized per stored
+// value so the scrypt check runs at most once per password change.
+let defaultPwCache = { key: null, result: false };
+function isDefaultPassword() {
+  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) {
+    return process.env.FREE_ROUTER_WEBUI_PASSWORD === 'admin123';
+  }
+  const stored = storedWebuiPassword();
+  if (stored === 'admin123') return true;
+  if (defaultPwCache.key === stored) return defaultPwCache.result;
+  const result = verifyPassword('admin123', stored);
+  defaultPwCache = { key: stored, result };
+  return result;
+}
+
+function setStoredWebuiPassword(value, { persist = true } = {}) {
+  // Readers prefer config.webui over the legacy config.ui mirror, so the
+  // overlay copy alone is authoritative; the tracked base file is untouched.
+  setOverlayValue(['webui', 'password'], value);
+  defaultPwCache.key = null;
+  if (!persist) return true;
+  try {
+    persistOverlayFile();
+  } catch (error) {
+    log(`could not persist web UI password: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+  return true;
+}
+
+function checkWebuiPassword(input) {
+  const password = String(input || '');
+  if (!password) return false;
+  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) {
+    return verifyPassword(password, process.env.FREE_ROUTER_WEBUI_PASSWORD);
+  }
+  return verifyPassword(password, storedWebuiPassword());
+}
+
+// One-time upgrade: replace a plaintext stored password with a salted hash.
+// Runs at boot and after successful legacy logins (operators hand-editing
+// the file between restarts converge on the next login either way).
+function upgradePasswordStorage(reason) {
+  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) return;
+  const stored = storedWebuiPassword();
+  if (isPasswordHash(stored)) return;
+  setStoredWebuiPassword(hashPassword(stored));
+  log(`upgraded web UI password storage to salted scrypt hash (${reason})`);
+}
+// Login session TTL in hours (default 24, 0 = never expires).
+const sessionTtlHours = () => {
+  const raw = Number(config.webui?.sessionTtlHours ?? 24);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 24;
+};
+const webuiSessions = new Map();
+function webuiSessionToken(req) {
+  const cookie = String(req.headers.cookie || '');
+  const match = cookie.match(/(?:^|;\s*)fr_session=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+function pruneWebuiSessions() {
+  const now = Date.now();
+  for (const [token, expiresAt] of webuiSessions) {
+    if (expiresAt <= now) webuiSessions.delete(token);
+  }
+}
+let secretRedactor = config.redactSecrets === false ? null : createSecretRedactor(redactorEnv());
+
+// The redactor snapshots secrets at build time, so keys added through the
+// UI would otherwise never be stripped from upstream payloads. Overlay-
+// stored provider keys and gateway keys are not in process.env, so they are
+// merged in under synthetic names the redactor recognises as secrets.
+function redactorEnv() {
+  const merged = { ...process.env };
+  let index = 0;
+  for (const provider of PROVIDERS.values()) {
+    for (const entry of provider.apiKeys || []) {
+      if (entry.key) merged[`FREE_ROUTER_TOML_${index}_API_KEY`] = entry.key;
+      index += 1;
+    }
+  }
+  for (const entry of gatewayKeys()) {
+    if (entry.key) merged[`FREE_ROUTER_GATEWAY_${index}_TOKEN`] = entry.key;
+    index += 1;
+  }
+  const admin = storedWebuiPassword();
+  if (admin) merged.FREE_ROUTER_WEBUI_PASSWORD = admin;
+  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) {
+    merged.FREE_ROUTER_WEBUI_PASSWORD = process.env.FREE_ROUTER_WEBUI_PASSWORD;
+  }
+  return merged;
+}
+
 function refreshSecretRedactor() {
   if (config.redactSecrets === false) return;
-  secretRedactor = createSecretRedactor();
+  secretRedactor = createSecretRedactor(redactorEnv());
+}
+
+// One-time legacy migration: on the first boot with no migration record,
+// import provider keys found in the .env file into the overlay so
+// config.local.json becomes the single place user data lives afterwards.
+// Imported vars are removed from .env (their values already live in the
+// overlay); the web UI shows a notice with what was moved.
+function parseEnvAssignments(text) {
+  const vars = new Map();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match) continue;
+    let value = match[2];
+    if (value.length > 1 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    if (value) vars.set(match[1], value);
+  }
+  return vars;
+}
+
+function migrateEnvFileOnce() {
+  if (config.migratedFromEnv) return;
+  let envFileExisted = false;
+  let fileVars = new Map();
+  try {
+    envFileExisted = fs.existsSync(UI_ENV_PATH);
+    if (envFileExisted) fileVars = parseEnvAssignments(fs.readFileSync(UI_ENV_PATH, 'utf8'));
+  } catch {
+    fileVars = new Map();
+  }
+  const summary = { at: new Date().toISOString(), providers: {}, gateway: 0 };
+  if (fileVars.size) {
+    const clearVars = {};
+    for (const provider of PROVIDERS.values()) {
+      const fileKeys = (provider.apiKeys || []).filter((e) => e.source === 'file').map((e) => ({ name: e.name, key: e.key }));
+      const have = new Set(fileKeys.map((e) => e.key));
+      const fresh = [];
+      const candidates = [
+        { varName: provider.keyEnv, plural: false },
+        { varName: `${provider.keyEnv}S`, plural: true },
+        { varName: `${provider.keyEnv}_KEYS`, plural: true },
+      ];
+      for (const { varName, plural } of candidates) {
+        const fileValue = fileVars.get(varName);
+        if (!fileValue) continue;
+        // The file wins when nothing else provides the var; otherwise only
+        // migrate values the file actually contributed (a real environment
+        // variable wins over the file and stays untouched).
+        const effective = String(process.env[varName] || '');
+        const fileValues = plural
+          ? fileValue.split(',').map((s) => s.trim()).filter(Boolean)
+          : [fileValue.trim()];
+        const effectiveValues = plural
+          ? effective.split(',').map((s) => s.trim()).filter(Boolean)
+          : [effective.trim()].filter(Boolean);
+        const values = effectiveValues.length
+          ? effectiveValues.filter((v) => fileValues.includes(v))
+          : [...fileValues];
+        const usable = values.filter((v) => !have.has(v));
+        for (const v of usable) {
+          have.add(v);
+          fresh.push(v);
+        }
+        if (usable.length) clearVars[varName] = '';
+      }
+      if (fresh.length) {
+        const named = fresh.map((key, i) => ({ name: `migrated-${i + 1}`, key }));
+        editableProviderRaw(provider.name);
+        registry.setProviderKeys(provider.name, [...fileKeys, ...named]);
+        summary.providers[provider.name] = fresh.length;
+      }
+    }
+    // A personal gateway client key kept in .env becomes a named gateway key
+    // (it stays in .env too, since local scripts like models.sh need it).
+    const clientFileKey = fileVars.get('FREE_ROUTER_API_KEY') || '';
+    const clientEffective = String(process.env.FREE_ROUTER_API_KEY || '');
+    const clientKey = clientEffective || clientFileKey;
+    if (clientKey && !gatewayKeys().length) {
+      setOverlayValue(['gateway', 'keys'], [
+        { name: 'migrated', key: clientKey, createdAt: new Date().toISOString() },
+      ]);
+      setOverlayValue(['gateway', 'requireAuth'], true);
+      summary.gateway = 1;
+    }
+    if (Object.keys(clearVars).length && envFileExisted) {
+      try {
+        updateEnvFile(UI_ENV_PATH, clearVars);
+        for (const name of Object.keys(clearVars)) delete process.env[name];
+        for (const provider of PROVIDERS.values()) registry.refreshKeysFromEnv(provider.name);
+      } catch (error) {
+        log(`env migration: could not clean ${displayPath(UI_ENV_PATH)}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else if (Object.keys(clearVars).length) {
+      // No .env file (e.g. docker env_file injects variables without one):
+      // drop the migrated values from this process so TOML stays canonical.
+      for (const name of Object.keys(clearVars)) delete process.env[name];
+      for (const provider of PROVIDERS.values()) registry.refreshKeysFromEnv(provider.name);
+    }
+  }
+  setOverlayValue(['migratedFromEnv'], summary);
+  try {
+    persistOverlayFile();
+  } catch (error) {
+    log(`env migration: could not persist config: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  refreshSecretRedactor();
+  const imported = Object.values(summary.providers).reduce((a, b) => a + b, 0);
+  if (imported || summary.gateway) {
+    log(`migrated ${imported} provider key(s) and ${summary.gateway} gateway key(s) from ${displayPath(UI_ENV_PATH)} into ${OVERLAY_FILENAME}; the overlay file is now where user data lives`);
+  }
+}
+
+migrateEnvFileOnce();
+upgradePasswordStorage('boot');
+
+// Gateway (downstream) API keys: named client credentials for LAN access.
+// Auth is required once at least one key exists (unless explicitly disabled).
+function gatewayKeys() {
+  const keys = config.gateway?.keys;
+  return Array.isArray(keys) ? keys.filter((entry) => entry && entry.key) : [];
+}
+
+function gatewayAuthRequired() {
+  if (config.gateway?.requireAuth === false && !gatewayKeys().length) return false;
+  if (config.gateway?.requireAuth === true) return true;
+  return gatewayKeys().length > 0;
+}
+
+function bearerKey(req) {
+  const header = String(req.headers.authorization || '');
+  const match = header.match(/^\s*Bearer\s+(.+?)\s*$/i);
+  return match ? match[1] : '';
+}
+
+function gatewayClientName(req) {
+  const key = bearerKey(req);
+  if (!key) return '';
+  return gatewayKeys().find((entry) => entry.key === key)?.name || '';
+}
+
+function gatewayGuardFailure(req) {
+  if (!gatewayAuthRequired()) return '';
+  if (gatewayClientName(req)) return '';
+  return bearerKey(req) ? 'invalid API key' : 'missing API key (Authorization: Bearer <key>)';
 }
 
 const cooldowns = new Map();
@@ -350,11 +683,13 @@ function dailyLimitFor(key) {
   // value is only a stand-in until the provider tells us the real one.
   const learned = learnedDailyLimit(key);
   if (learned) return learned;
+  // Read live from config (not a startup snapshot) so UI edits apply at once.
+  const limits = config.usage?.dailyLimits || {};
   const separator = String(key).indexOf(':');
   const provider = separator >= 0 ? key.slice(0, separator) : '';
   const model = separator >= 0 ? key.slice(separator + 1) : key;
   for (const lookup of [key, model, `${provider}:*`]) {
-    const value = Number(USAGE_DAILY_LIMITS[lookup]);
+    const value = Number(limits[lookup]);
     if (Number.isFinite(value) && value > 0) return value;
   }
   return null;
@@ -452,7 +787,7 @@ function loadDiscoveryState() {
     const state = JSON.parse(fs.readFileSync(DISCOVERY_STATE_PATH, 'utf8'));
     usageByDay = sanitizeUsage(state.usage);
     pruneUsage();
-    if (!DISCOVERY_ENABLED) return;
+    if (!discoveryEnabled) return;
     discoveredModelIds = Array.isArray(state.addedModels)
       ? state.addedModels.filter((id) => typeof id === 'string')
       : [];
@@ -690,7 +1025,7 @@ function routeCandidates(routeName) {
   const configuredKeys = normalizedConfigured.map(candidateKey);
   const configuredSet = new Set(configuredKeys);
   const configuredIndex = new Map(configuredKeys.map((key, index) => [key, index]));
-  if (!DISCOVERY_ENABLED || routeName !== DISCOVERY_ROUTE) {
+  if (!discoveryEnabled || routeName !== DISCOVERY_ROUTE) {
     return orderByModelThenProvider(activeConfigured, configuredSet, configuredIndex);
   }
 
@@ -729,7 +1064,7 @@ function syncModelAvailability() {
 }
 
 async function refreshCatalog(force = false) {
-  await registry.refreshCatalogs(force, CATALOG_REFRESH_MS, log);
+  await registry.refreshCatalogs(force, catalogRefreshMs, log);
   syncModelAvailability();
 }
 
@@ -910,7 +1245,7 @@ async function probeFreeTierCandidates() {
 }
 
 async function performFreeModelDiscovery(forceCatalogRefresh = false) {
-  if (!DISCOVERY_ENABLED) return;
+  if (!discoveryEnabled) return;
   if (
     discoveryLastCheckedAt &&
     Date.now() - discoveryLastCheckedAt < DISCOVERY_INTERVAL_MS
@@ -1006,7 +1341,7 @@ async function performFreeModelDiscovery(forceCatalogRefresh = false) {
       return evaluation?.status !== 'scored' || evaluation.version !== EVALUATION_VERSION;
     });
     const toEvaluate = [...additions, ...stale].slice(0, EVALUATION_MAX_PER_RUN);
-    if (EVALUATION_ENABLED && toEvaluate.length) {
+    if (evaluationEnabled && toEvaluate.length) {
       if (stale.length) {
         log(`re-evaluating ${stale.length} model(s) with missing or outdated scores`, stale);
       }
@@ -1033,7 +1368,7 @@ async function performFreeModelDiscovery(forceCatalogRefresh = false) {
 
   // Runs regardless of the priced catalog's outcome, since it depends on a
   // different provider and a failure there says nothing about this.
-  if (EVALUATION_ENABLED) {
+  if (evaluationEnabled) {
     try {
       await probeFreeTierCandidates();
     } catch (error) {
@@ -1056,7 +1391,7 @@ function discoverFreeModels(forceCatalogRefresh = false) {
 }
 
 function scheduleNextDiscovery() {
-  if (!DISCOVERY_ENABLED) return;
+  if (!discoveryEnabled) return;
   const elapsed = discoveryLastCheckedAt ? Date.now() - discoveryLastCheckedAt : 0;
   const delay = discoveryLastCheckedAt
     ? Math.max(1000, DISCOVERY_INTERVAL_MS - elapsed)
@@ -1090,23 +1425,36 @@ function requestNeeds(body) {
   };
 }
 
-function cooldownRemaining(candidate) {
-  const key = candidateKey(candidate);
-  const entry = cooldowns.get(key);
-  if (!entry) return 0;
+function cooldownKey(candidate, slot) {
+  const base = candidateKey(candidate);
+  if (slot === undefined || slot === null) return base;
+  const suffix = typeof slot === 'object' ? (slot.index ?? slot.name ?? '') : slot;
+  return `${base}#${suffix}`;
+}
+
+function cooldownRemaining(candidate, slot) {
+  const entry = cooldowns.get(cooldownKey(candidate, slot));
+  if (!entry) {
+    // Legacy entries predate per-key cooldowns; still honour them.
+    if (slot !== undefined && slot !== null) {
+      const legacy = cooldowns.get(candidateKey(candidate));
+      if (legacy && legacy.until > Date.now()) return legacy.until - Date.now();
+    }
+    return 0;
+  }
   const remaining = entry.until - Date.now();
   if (remaining <= 0) {
-    cooldowns.delete(key);
+    cooldowns.delete(cooldownKey(candidate, slot));
     return 0;
   }
   return remaining;
 }
 
-function setCooldown(candidate, kind, reason, overrideMs = 0) {
+function setCooldown(candidate, kind, reason, overrideMs = 0, slot = null) {
   const durations = config.cooldownMs || {};
   const duration = overrideMs || Number(durations[kind] || 0);
   if (!duration) return;
-  cooldowns.set(candidateKey(candidate), {
+  cooldowns.set(cooldownKey(candidate, slot), {
     until: Date.now() + duration,
     kind,
     reason: String(reason || '').slice(0, 300),
@@ -1170,7 +1518,10 @@ function filterCandidates(configured, body, requestedModel) {
       skipped.push({ model: candidateKey(candidate), reason: 'missing requested capability' });
       continue;
     }
-    const remaining = cooldownRemaining(candidate);
+    const slots = registry.keySlots(candidate.provider);
+    const remaining = slots.length
+      ? Math.min(...slots.map((slot) => cooldownRemaining(candidate, slot)))
+      : cooldownRemaining(candidate);
     if (remaining > 0) {
       skipped.push({
         model: candidateKey(candidate),
@@ -1284,9 +1635,9 @@ function errorSummary(status, raw) {
   );
 }
 
-async function fetchModel(candidate, body, clientSignal) {
+async function fetchModel(candidate, body, clientSignal, slot) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('attempt timeout')), ATTEMPT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(new Error('attempt timeout')), attemptTimeoutMs);
   const abortFromClient = () => controller.abort(new Error('client disconnected'));
   clientSignal?.addEventListener('abort', abortFromClient, { once: true });
   const cleanup = () => {
@@ -1295,12 +1646,13 @@ async function fetchModel(candidate, body, clientSignal) {
   };
   try {
     const provider = PROVIDERS.get(candidate.provider);
-    if (!provider?.baseUrl || !provider.apiKey) {
+    const key = slot?.key ?? provider?.apiKey;
+    if (!provider?.baseUrl || !key) {
       throw new Error(`provider ${candidate.provider} is not configured`);
     }
     const response = await fetch(registry.chatUrl(candidate.provider), {
       method: 'POST',
-      headers: registry.headers(candidate.provider),
+      headers: registry.headers(candidate.provider, key),
       body: JSON.stringify(sanitizeUpstreamBody(body, candidate)),
       signal: controller.signal,
     });
@@ -1311,7 +1663,7 @@ async function fetchModel(candidate, body, clientSignal) {
   }
 }
 
-async function attemptJson(candidate, body, clientSignal) {
+async function attemptJson(candidate, body, clientSignal, slot) {
   let response;
   let cleanup = () => {};
   try {
@@ -1319,6 +1671,7 @@ async function attemptJson(candidate, body, clientSignal) {
       candidate,
       { ...body, stream: false },
       clientSignal,
+      slot,
     ));
   } catch (error) {
     const timedOut = error?.name === 'AbortError' || /timeout/i.test(String(error));
@@ -1379,7 +1732,7 @@ async function attemptJson(candidate, body, clientSignal) {
   };
 }
 
-async function attemptStream(candidate, body, res, clientSignal) {
+async function attemptStream(candidate, body, res, clientSignal, slot) {
   let response;
   let cleanup = () => {};
   try {
@@ -1387,6 +1740,7 @@ async function attemptStream(candidate, body, res, clientSignal) {
       candidate,
       { ...body, stream: true },
       clientSignal,
+      slot,
     ));
   } catch (error) {
     const timedOut = error?.name === 'AbortError' || /timeout/i.test(String(error));
@@ -1531,7 +1885,15 @@ function routeStatus() {
     routes[name] = candidates.map((candidate, priority) => {
       const key = candidateKey(candidate);
       const model = candidateMetadata(candidate);
-      const cooldown = cooldowns.get(key);
+      // Per-key cooldowns share a `provider:model#slot` prefix; the status
+      // shows the worst one so the UI reflects a spent quota even when only
+      // one of several keys is cooling down.
+      let cooldown = cooldowns.get(key);
+      for (const [storedKey, entry] of cooldowns) {
+        if (storedKey !== key && !storedKey.startsWith(`${key}#`)) continue;
+        if (entry.until <= now) continue;
+        if (!cooldown || entry.until > cooldown.until) cooldown = entry;
+      }
       const pinned = PINNED_MODELS.has(key) || PINNED_MODELS.has(candidate.model);
       return {
         priority: priority + 1,
@@ -1594,48 +1956,80 @@ async function handleChat(req, res) {
   for (const candidate of candidates) {
     if (clientController.signal.aborted) return;
     if (failedProviders.has(candidate.provider)) continue;
-    log(`trying ${candidateKey(candidate)} for ${requestedModel}`);
-    const result = body.stream
-      ? await attemptStream(candidate, body, res, clientController.signal)
-      : await attemptJson(candidate, body, clientController.signal);
+    // Multi-account: each candidate is tried with every usable key in
+    // round-robin order. A 401 retires just that key; rate limits cool down
+    // just that key.
+    const slots = registry.keySlots(candidate.provider);
+    registry.rotateKeyCursor(candidate.provider);
+    const attempts = slots.length ? slots : [null];
+    let candidateOk = false;
+    for (const slot of attempts) {
+      if (clientController.signal.aborted) return;
+      if (slot && cooldownRemaining(candidate, slot) > 0) continue;
+      const slotLabel = slot ? ` [${slot.name}]` : '';
+      log(`trying ${candidateKey(candidate)}${slotLabel} for ${requestedModel}`);
+      const result = body.stream
+        ? await attemptStream(candidate, body, res, clientController.signal, slot)
+        : await attemptJson(candidate, body, clientController.signal, slot);
 
-    if (result.ok) {
-      recordUsage(candidate, 'ok');
-      rememberSelection({
-        route: requestedModel,
+      if (result.ok) {
+        recordUsage(candidate, 'ok');
+        rememberSelection({
+          route: requestedModel,
+          provider: candidate.provider,
+          model: candidate.model,
+          selectedAt: new Date().toISOString(),
+        });
+        if (!body.stream) {
+          log(`selected ${candidateKey(candidate)}${slotLabel}`);
+          return sendJson(res, 200, result.payload, {
+            'X-Free-Router-Model': candidate.model,
+            'X-Free-Router-Provider': candidate.provider,
+          });
+        }
+        return;
+      }
+
+      recordUsage(
+        candidate,
+        clientController.signal.aborted ? 'aborted' : result.kind || 'other',
+      );
+      failures.push({
         provider: candidate.provider,
         model: candidate.model,
-        selectedAt: new Date().toISOString(),
+        key: slot?.name || undefined,
+        status: result.status,
+        reason: result.reason,
       });
-      if (!body.stream) {
-        log(`selected ${candidateKey(candidate)}`);
-        return sendJson(res, 200, result.payload, {
-          'X-Free-Router-Model': candidate.model,
-          'X-Free-Router-Provider': candidate.provider,
-        });
+      const providerWaitMs = applyProviderVerdict(candidate, result);
+      if (result.kind) setCooldown(candidate, result.kind, result.reason, providerWaitMs, slot);
+      log(`failed ${candidateKey(candidate)}${slotLabel}: ${result.status} ${result.reason}`);
+      if (result.fatal) {
+        // Wrong key: retire it and try the next key on the same candidate.
+        if (slot?.key && result.status === 401) {
+          registry.markKeyInvalid(candidate.provider, slot.key);
+          log(`retired key [${slot.name}] for ${candidate.provider}: 401`);
+          continue;
+        }
+        break;
       }
-      return;
+      // The same history will 400 on every Gemini thinking model. Stop here so
+      // 3.8-flash, 3.7-flash, and Flash-Lite are not each billed for a refusal.
+      if (isMissingThoughtSignatureError(result.status, result.reason)) {
+        log(`skipping remaining ${candidate.provider} candidates: missing thought_signature`);
+        failedProviders.add(candidate.provider);
+        break;
+      }
+      // Rate limit / timeout on this key: try the next key before moving on.
+      if (attempts.length > 1 && (result.status === 429 || result.status === 504 || result.kind === 'timeout')) {
+        continue;
+      }
+      break;
     }
-
-    recordUsage(
-      candidate,
-      clientController.signal.aborted ? 'aborted' : result.kind || 'other',
-    );
-    failures.push({
-      provider: candidate.provider,
-      model: candidate.model,
-      status: result.status,
-      reason: result.reason,
-    });
-    const providerWaitMs = applyProviderVerdict(candidate, result);
-    if (result.kind) setCooldown(candidate, result.kind, result.reason, providerWaitMs);
-    log(`failed ${candidateKey(candidate)}: ${result.status} ${result.reason}`);
-    if (result.fatal) failedProviders.add(candidate.provider);
-    // The same history will 400 on every Gemini thinking model. Stop here so
-    // 3.8-flash, 3.7-flash, and Flash-Lite are not each billed for a refusal.
-    if (isMissingThoughtSignatureError(result.status, result.reason)) {
-      log(`skipping remaining ${candidate.provider} candidates: missing thought_signature`);
-      failedProviders.add(candidate.provider);
+    // All keys for this provider failed fatally: skip the rest of its models.
+    if (failures.length && failures[failures.length - 1]?.status === 401) {
+      const remainingSlots = registry.keySlots(candidate.provider);
+      if (!remainingSlots.length) failedProviders.add(candidate.provider);
     }
   }
 
@@ -1655,18 +2049,33 @@ function isLoopbackAddress(address) {
   return plain === '::1' || plain === '127.0.0.1' || plain.startsWith('127.');
 }
 
-// The router has no caller authentication, so any page the user visits could
-// otherwise drive these endpoints. Three independent checks:
-//   - the peer must be on loopback, even if the listener was bound wider;
-//   - the Host header must be a loopback name, which blocks DNS rebinding;
-//   - the request must not be cross-site, which blocks browser-driven CSRF.
+// LAN-ready guard: the loopback-only restriction is gone. Protection now
+// comes from authentication instead of the network:
+//   - web UI + management APIs require the admin session (password login);
+//   - /v1/* requires a gateway API key once one is configured.
+// What remains here is CSRF/rebinding hygiene, now LAN-aware:
+//   - cross-site browser requests are blocked (Sec-Fetch-Site);
+//   - the Host header must be loopback, a private LAN IP, or a local
+//     hostname (.local / single-label); a public domain (DNS rebinding)
+//     is rejected;
+//   - a forged Origin that does not match the request host is rejected,
+//     while same-host LAN origins are allowed.
 // A plain curl call sends neither Origin nor Sec-Fetch-Site and is allowed.
-function uiGuardFailure(req) {
-  if (!isLoopbackAddress(req.socket?.remoteAddress)) return 'requests must come from loopback';
+function isLocalHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  if (host === '::1' || host === '127.0.0.1' || host.startsWith('127.') || host === '[::1]') return true;
+  if (/^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)) return true;
+  if (/^(fc[0-9a-f]{2}|fd[0-9a-f]{2}|fe80):/i.test(host)) return true;
+  if (!host.includes('.') && /^[a-z0-9-]+$/i.test(host)) return true;
+  return false;
+}
 
+function uiGuardFailure(req) {
   const host = String(req.headers.host || '');
   const hostname = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-  if (hostname && hostname !== 'localhost' && !isLoopbackAddress(hostname)) {
+  if (hostname && !isLocalHost(hostname)) {
     return `unexpected Host header: ${host}`;
   }
 
@@ -1683,9 +2092,21 @@ function uiGuardFailure(req) {
     } catch {
       return `invalid Origin header: ${origin}`;
     }
-    if (originHost !== 'localhost' && !isLoopbackAddress(originHost)) {
+    const sameHost = originHost.toLowerCase() === hostname.toLowerCase();
+    if (!sameHost && !isLocalHost(originHost)) {
       return `unexpected Origin header: ${origin}`;
     }
+  }
+  return '';
+}
+
+function webuiAuthFailure(req) {
+  const token = webuiSessionToken(req);
+  if (!token || !webuiSessions.has(token)) return 'web UI login required';
+  const expiresAt = webuiSessions.get(token);
+  if (expiresAt <= Date.now()) {
+    webuiSessions.delete(token);
+    return 'session expired, please log in again';
   }
   return '';
 }
@@ -1694,17 +2115,42 @@ function uiProviderState() {
   const catalogHealth = registry.health();
   const providers = [...PROVIDERS.values()];
   providers.sort((left, right) => Number(right.name === 'gemini') - Number(left.name === 'gemini'));
-  return providers.map((provider) => ({
-    name: provider.name,
-    keyEnv: provider.keyEnv,
-    baseUrl: provider.baseUrl,
-    kind: registry.providerKind(provider),
-    configured: Boolean(provider.apiKey),
-    maskedKey: maskSecret(provider.apiKey),
-    catalogModels: provider.usesCatalog ? provider.catalog.size : null,
-    catalogError: catalogHealth[provider.name]?.catalogError || null,
-    unavailableModels: catalogHealth[provider.name]?.unavailableModels || [],
-  }));
+  return providers.map((provider) => {
+    const unavailable = catalogHealth[provider.name]?.unavailableModels || [];
+    // Model totals next to the free-model availability: priced catalogs count
+    // zero-cost chat models, allowlists count entries still offered upstream.
+    let modelCount = null;
+    let freeCount = null;
+    if (provider.catalogHasPricing) {
+      if (provider.catalog?.size) {
+        modelCount = provider.catalog.size;
+        freeCount = [...provider.catalog.values()].filter((m) => isZeroCost(m) && isChatModel(m)).length;
+      }
+    } else {
+      modelCount = provider.freeModels.size;
+      freeCount = [...provider.freeModels].filter((id) => !unavailable.includes(id)).length;
+    }
+    return {
+      name: provider.name,
+      keyEnv: provider.keyEnv,
+      baseUrl: provider.baseUrl,
+      kind: registry.providerKind(provider),
+      configured: registry.hasUsableKey(provider),
+      keyCount: provider.apiKeys?.length || 0,
+      keys: (provider.apiKeys || []).map((entry) => ({
+        name: entry.name,
+        source: entry.source,
+        maskedKey: maskSecret(entry.key),
+        invalid: provider.invalidKeys.has(entry.key),
+      })),
+      maskedKey: maskSecret(provider.apiKey),
+      catalogModels: provider.usesCatalog ? provider.catalog.size : null,
+      modelCount,
+      freeCount,
+      catalogError: catalogHealth[provider.name]?.catalogError || null,
+      unavailableModels: unavailable,
+    };
+  });
 }
 
 function uiRouteState() {
@@ -1718,11 +2164,23 @@ function uiRouteState() {
     zeroCost: entry.zeroCost,
     cooldownSeconds: entry.cooldownSeconds,
     scoreAdjustment: entry.scoreAdjustment,
-    providerConfigured: Boolean(PROVIDERS.get(entry.provider)?.apiKey),
+    providerConfigured: registry.hasUsableKey(PROVIDERS.get(entry.provider)),
     usage: entry.usage,
   }));
 }
 
+function providerFileKeys(name) {
+  const raw = config.providers?.[name];
+  if (!raw || typeof raw !== 'object') return [];
+  return Array.isArray(raw.keys) ? raw.keys : [];
+}
+
+// Named multi-key write path. Body variants:
+//   {provider, key}                 legacy: replace the env-backed key
+//   {provider, name, key}           add or replace the named file key
+//   {provider, name, key: ''}       delete the named file key
+// File keys persist to the TOML/JSON config; the legacy env path still
+// updates the .env file so `start.sh` keeps working.
 async function handleKeyUpdate(req, res) {
   let body;
   try {
@@ -1747,10 +2205,39 @@ async function handleKeyUpdate(req, res) {
     });
   }
 
+  const keyName = String(body.name || '').trim().slice(0, 64);
   const key = typeof body.key === 'string' ? body.key.trim() : '';
   const problem = validateSecret(key);
   if (problem) {
     return sendJson(res, 400, { error: { message: problem, type: 'invalid_request_error' } });
+  }
+
+  // Named path: file-backed multi-account keys -> overlay file.
+  if (keyName) {
+    const next = providerFileKeys(name)
+      .filter((entry) => String(entry?.name || '') !== keyName)
+      .map((entry) => ({ name: String(entry.name), key: String(entry.key || '') }));
+    if (key) next.push({ name: keyName, key });
+    editableProviderRaw(name);
+    registry.setProviderKeys(name, next);
+    try {
+      persistOverlayFile();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return sendJson(res, 500, {
+        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
+      });
+    }
+    refreshSecretRedactor();
+    log(`${key ? 'set' : 'cleared'} provider key [${keyName}] for ${name} via web interface`);
+    if (key && provider.usesCatalog) {
+      try {
+        await refreshCatalog(true);
+      } catch (error) {
+        log(`catalog refresh after key change failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return sendJson(res, 200, { ok: true, provider: name, name: keyName, configured: Boolean(key) });
   }
 
   try {
@@ -1774,6 +2261,663 @@ async function handleKeyUpdate(req, res) {
     }
   }
   return sendJson(res, 200, { ok: true, provider: name, configured: Boolean(key) });
+}
+
+function randomGatewayKey() {
+  return `sk-fr-${crypto.randomBytes(24).toString('base64url')}`;
+}
+
+// Gateway client keys (downstream). Creating the first key enables auth;
+// the full key value is returned only once at creation.
+async function handleGatewayKeys(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const action = String(body.action || 'create');
+  if (action === 'setRequireAuth') {
+    setOverlayValue(['gateway', 'requireAuth'], Boolean(body.requireAuth));
+    if (gatewayAuthRequired() && !gatewayKeys().length) {
+      setOverlayValue(['gateway', 'requireAuth'], false);
+      return sendJson(res, 400, {
+        error: { message: 'create at least one API key before enabling auth', type: 'invalid_request_error' },
+      });
+    }
+    try {
+      persistOverlayFile();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return sendJson(res, 500, {
+        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
+      });
+    }
+    refreshSecretRedactor();
+    return sendJson(res, 200, { ok: true, requireAuth: gatewayAuthRequired() });
+  }
+
+  if (action === 'delete') {
+    const keyName = String(body.name || '');
+    const kept = gatewayKeys().filter((entry) => entry?.name !== keyName);
+    if (kept.length === gatewayKeys().length) {
+      return sendJson(res, 404, { error: { message: `unknown key: ${keyName}`, type: 'not_found' } });
+    }
+    setOverlayValue(['gateway', 'keys'], kept);
+    if (!kept.length) setOverlayValue(['gateway', 'requireAuth'], false);
+    try {
+      persistOverlayFile();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return sendJson(res, 500, {
+        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
+      });
+    }
+    refreshSecretRedactor();
+    log(`deleted gateway API key [${keyName}] via web interface`);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (action === 'create') {
+    const keyName = String(body.name || '').trim().slice(0, 64);
+    if (!keyName) {
+      return sendJson(res, 400, { error: { message: 'name is required', type: 'invalid_request_error' } });
+    }
+    if (gatewayKeys().some((entry) => entry?.name === keyName)) {
+      return sendJson(res, 400, { error: { message: `key already exists: ${keyName}`, type: 'invalid_request_error' } });
+    }
+    const value = typeof body.key === 'string' && body.key.trim() ? body.key.trim() : randomGatewayKey();
+    const problem = validateSecret(value);
+    if (problem) {
+      return sendJson(res, 400, { error: { message: problem, type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['gateway', 'keys'], [
+      ...gatewayKeys(),
+      { name: keyName, key: value, createdAt: new Date().toISOString() },
+    ]);
+    setOverlayValue(['gateway', 'requireAuth'], true);
+    try {
+      persistOverlayFile();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return sendJson(res, 500, {
+        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
+      });
+    }
+    refreshSecretRedactor();
+    log(`created gateway API key [${keyName}] via web interface`);
+    return sendJson(res, 200, { ok: true, name: keyName, key: value, requireAuth: true });
+  }
+
+  return sendJson(res, 400, { error: { message: `unknown action: ${action}`, type: 'invalid_request_error' } });
+}
+
+async function handleWebuiPassword(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const password = typeof body.password === 'string' ? body.password : '';
+  const problem = validateSecret(password);
+  if (problem || !password) {
+    return sendJson(res, 400, {
+      error: { message: problem || 'password is required', type: 'invalid_request_error' },
+    });
+  }
+  config.webui ||= {};
+  if (!setStoredWebuiPassword(hashPassword(password))) {
+    return sendJson(res, 500, {
+      error: { message: `could not write ${OVERLAY_FILENAME}`, type: 'config_write_failed' },
+    });
+  }
+  webuiSessions.clear();
+  refreshSecretRedactor();
+  log('web UI password changed via web interface; all sessions revoked');
+  return sendJson(res, 200, { ok: true });
+}
+
+async function handleServerConfig(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const notes = [];
+  if (body.host !== undefined) {
+    const host = String(body.host || '').trim();
+    if (!host) {
+      return sendJson(res, 400, { error: { message: 'host is required', type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['host'], host);
+    notes.push('host saved; restart to take effect');
+  }
+  if (body.port !== undefined) {
+    const port = Number(body.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return sendJson(res, 400, { error: { message: 'port must be 1-65535', type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['port'], port);
+    notes.push('port saved; restart to take effect');
+  }
+  try {
+    persistOverlayFile();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return sendJson(res, 500, {
+      error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
+    });
+  }
+  return sendJson(res, 200, { ok: true, host: config.host, port: config.port, notes });
+}
+
+// ---- Editable configuration (web UI settings tabs) ----
+
+function routeEntryString(entry) {
+  if (typeof entry === 'string') return entry;
+  if (entry && typeof entry === 'object') {
+    const provider = String(entry.provider || '');
+    const model = String(entry.model || entry.id || '');
+    if (provider && model) return `${provider}:${model}`;
+    return model;
+  }
+  return '';
+}
+
+// "provider:model" -> {provider, model} when the prefix names a provider,
+// otherwise kept as a plain string (e.g. "z-ai/glm-5.2:free").
+function parseRouteEntryString(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const separator = text.indexOf(':');
+  if (separator > 0 && PROVIDERS.has(text.slice(0, separator))) {
+    const model = text.slice(separator + 1).trim();
+    if (!model) return null;
+    return { provider: text.slice(0, separator), model };
+  }
+  return text;
+}
+
+function editableConfigState() {
+  const routes = {};
+  for (const [name, entries] of Object.entries(config.routes || {})) {
+    routes[name] = (Array.isArray(entries) ? entries : []).map(routeEntryString).filter(Boolean);
+  }
+  const limits = Object.entries(config.usage?.dailyLimits || {}).map(([key, limit]) => ({
+    key,
+    limit: Number(limit),
+    source: dailyLimitSource(key),
+  }));
+  limits.sort((a, b) => a.key.localeCompare(b.key));
+  return {
+    providers: [...PROVIDERS.values()].map((provider) => ({
+      name: provider.name,
+      keyEnv: provider.keyEnv,
+      baseUrl: provider.baseUrl,
+      catalog: provider.usesCatalog,
+      pricing: provider.catalogHasPricing,
+      probeFreeTier: provider.probeFreeTier,
+      freeModels: [...provider.freeModels],
+      keyCount: provider.apiKeys?.length || 0,
+    })),
+    routes,
+    discovery: {
+      enabled: discoveryEnabled,
+      provider: registry.discoveryProvider,
+      intervalHours: Math.round(DISCOVERY_INTERVAL_MS / 3600000),
+      route: DISCOVERY_ROUTE,
+      evaluationEnabled,
+      pinnedModels: [...PINNED_MODELS],
+    },
+    limits,
+    general: {
+      attemptTimeoutMs,
+      catalogRefreshMs,
+      redactSecrets: config.redactSecrets !== false,
+      socksFirstHosts: config.socksFirstHosts || [],
+      defaultProvider: registry.defaultProvider,
+      retentionDays: USAGE_RETENTION_DAYS,
+      timezone: USAGE_TIMEZONE || '',
+    },
+  };
+}
+
+function persistOrFail(res) {
+  try {
+    persistOverlayFile();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    sendJson(res, 500, {
+      error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
+    });
+    return false;
+  }
+  return true;
+}
+
+function validProviderId(name) {
+  return /^[a-z][a-z0-9_-]*$/.test(String(name || ''));
+}
+
+function validHttpUrl(raw) {
+  try {
+    const url = new URL(String(raw || ''));
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+// Providers: create a new upstream, edit baseUrl/freeModels/flags, or delete.
+// Deleting also purges the provider's entries from all routes.
+async function handleProviders(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 128 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const action = String(body.action || '');
+  const name = String(body.name || '').trim();
+
+  if (action === 'create') {
+    if (!validProviderId(name)) {
+      return sendJson(res, 400, { error: { message: 'name must match [a-z][a-z0-9_-]*', type: 'invalid_request_error' } });
+    }
+    if (PROVIDERS.has(name)) {
+      return sendJson(res, 400, { error: { message: `provider already exists: ${name}`, type: 'invalid_request_error' } });
+    }
+    const baseUrl = String(body.baseUrl || '').trim().replace(/\/+$/, '');
+    if (!validHttpUrl(baseUrl)) {
+      return sendJson(res, 400, { error: { message: 'baseUrl must be an http(s) URL', type: 'invalid_request_error' } });
+    }
+    const freeModels = Array.isArray(body.freeModels)
+      ? [...new Set(body.freeModels.map((m) => String(m || '').trim()).filter(Boolean))]
+      : [];
+    const cfg = {
+      baseUrl,
+      keyEnv: String(body.keyEnv || `${name.replace(/-/g, '_').toUpperCase()}_API_KEY`),
+      catalog: body.catalog === true,
+      pricing: body.pricing !== false,
+      probeFreeTier: body.probeFreeTier === true,
+      freeModels,
+      keys: [],
+    };
+    setOverlayValue(['providers', name], cfg);
+    try {
+      registry.addProvider(name, cfg);
+    } catch (error) {
+      deleteOverlayValue(['providers', name]);
+      return sendJson(res, 400, { error: { message: String(error.message || error), type: 'invalid_request_error' } });
+    }
+    tombstone('_removedProviders', name, false);
+    if (!persistOrFail(res)) return undefined;
+    refreshSecretRedactor();
+    if (cfg.catalog) {
+      try {
+        await refreshCatalog(true);
+      } catch (error) {
+        log(`catalog refresh after provider add failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    log(`added provider ${name} via web interface`);
+    return sendJson(res, 200, { ok: true, name });
+  }
+
+  const provider = PROVIDERS.get(name);
+  if (!provider) {
+    return sendJson(res, 404, { error: { message: `unknown provider: ${name || '(missing)'}`, type: 'not_found' } });
+  }
+
+  if (action === 'delete') {
+    try {
+      registry.removeProvider(name);
+    } catch (error) {
+      return sendJson(res, 400, { error: { message: String(error.message || error), type: 'invalid_request_error' } });
+    }
+    deleteOverlayValue(['providers', name]);
+    tombstone('_removedProviders', name, true);
+    let purged = 0;
+    for (const [routeName, entries] of Object.entries(config.routes || {})) {
+      if (!Array.isArray(entries)) continue;
+      const kept = entries.filter((entry) => normalizeCandidate(entry).provider !== name);
+      if (kept.length === entries.length) continue;
+      purged += entries.length - kept.length;
+      setOverlayValue(['routes', routeName], kept);
+    }
+    if (!persistOrFail(res)) return undefined;
+    refreshSecretRedactor();
+    log(`deleted provider ${name} via web interface (purged ${purged} route entr${purged === 1 ? 'y' : 'ies'})`);
+    return sendJson(res, 200, { ok: true, purged });
+  }
+
+  if (action === 'update') {
+    const notes = [];
+    const cfg = editableProviderRaw(name);
+    if (body.baseUrl !== undefined) {
+      const baseUrl = String(body.baseUrl || '').trim().replace(/\/+$/, '');
+      if (!validHttpUrl(baseUrl)) {
+        return sendJson(res, 400, { error: { message: 'baseUrl must be an http(s) URL', type: 'invalid_request_error' } });
+      }
+      cfg.baseUrl = baseUrl;
+      provider.baseUrl = baseUrl;
+      notes.push('baseUrl updated');
+    }
+    if (body.freeModels !== undefined) {
+      if (!Array.isArray(body.freeModels)) {
+        return sendJson(res, 400, { error: { message: 'freeModels must be an array', type: 'invalid_request_error' } });
+      }
+      const list = [...new Set(body.freeModels.map((m) => String(m || '').trim()).filter(Boolean))];
+      cfg.freeModels = list;
+      provider.freeModels = new Set(list);
+      notes.push('freeModels updated');
+    }
+    if (body.catalog !== undefined) {
+      cfg.catalog = body.catalog === true;
+      notes.push('catalog flag saved; restart to take effect');
+    }
+    if (body.pricing !== undefined) {
+      cfg.pricing = body.pricing !== false;
+      notes.push('pricing flag saved; restart to take effect');
+    }
+    if (body.probeFreeTier !== undefined) {
+      cfg.probeFreeTier = body.probeFreeTier === true;
+      notes.push('probeFreeTier saved; restart to take effect');
+    }
+    // cfg is already the overlay-owned raw (see editableProviderRaw above).
+    if (!persistOrFail(res)) return undefined;
+    if (body.baseUrl !== undefined && provider.usesCatalog) {
+      try {
+        await refreshCatalog(true);
+      } catch (error) {
+        log(`catalog refresh after provider update failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return sendJson(res, 200, { ok: true, name, notes });
+  }
+
+  return sendJson(res, 400, { error: { message: `unknown action: ${action}`, type: 'invalid_request_error' } });
+}
+
+// Routes: replace a whole route membership list, create a new route, or delete
+// one. Models for price-free providers are auto-added to their freeModels
+// allowlist so the new entry is actually routable.
+async function handleRoutes(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 128 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const action = String(body.action || 'save');
+  const route = String(body.route || '').trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(route)) {
+    return sendJson(res, 400, { error: { message: 'route must match [A-Za-z0-9_-]+', type: 'invalid_request_error' } });
+  }
+
+  if (action === 'delete') {
+    if (route === DISCOVERY_ROUTE) {
+      return sendJson(res, 400, { error: { message: `cannot delete the discovery route: ${route}`, type: 'invalid_request_error' } });
+    }
+    if (!config.routes?.[route]) {
+      return sendJson(res, 404, { error: { message: `unknown route: ${route}`, type: 'not_found' } });
+    }
+    delete config.routes[route];
+    tombstone('_removedRoutes', route, true);
+    if (!persistOrFail(res)) return undefined;
+    log(`deleted route ${route} via web interface`);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (action !== 'save') {
+    return sendJson(res, 400, { error: { message: `unknown action: ${action}`, type: 'invalid_request_error' } });
+  }
+  if (!Array.isArray(body.models)) {
+    return sendJson(res, 400, { error: { message: 'models must be an array of "provider:model" or model strings', type: 'invalid_request_error' } });
+  }
+  const parsed = [];
+  const seen = new Set();
+  const notes = [];
+  for (const raw of body.models) {
+    const entry = parseRouteEntryString(raw);
+    if (!entry) {
+      return sendJson(res, 400, { error: { message: `empty model entry`, type: 'invalid_request_error' } });
+    }
+    const key = typeof entry === 'string' ? `:${entry}` : `${entry.provider}:${entry.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parsed.push(entry);
+    if (typeof entry !== 'string') {
+      const provider = PROVIDERS.get(entry.provider);
+      if (!provider) {
+        return sendJson(res, 400, { error: { message: `unknown provider in entry: ${routeEntryString(entry)}`, type: 'invalid_request_error' } });
+      }
+      if (!provider.catalogHasPricing && !provider.freeModels.has(entry.model)) {
+        provider.freeModels.add(entry.model);
+        const cfg = editableProviderRaw(entry.provider);
+        cfg.freeModels = [...provider.freeModels];
+        notes.push(`added ${entry.model} to ${entry.provider} freeModels`);
+      }
+    }
+  }
+  setOverlayValue(['routes', route], parsed);
+  tombstone('_removedRoutes', route, false);
+  if (!persistOrFail(res)) return undefined;
+  log(`saved route ${route} via web interface (${parsed.length} entries)`);
+  return sendJson(res, 200, { ok: true, route, count: parsed.length, notes });
+}
+
+// Daily quota limits: config values (provider-reported ones stay authoritative).
+async function handleLimits(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const action = String(body.action || 'set');
+  const key = String(body.key || '').trim();
+  if (!key) {
+    return sendJson(res, 400, { error: { message: 'key is required, e.g. "gemini:gemini-3.8-flash"', type: 'invalid_request_error' } });
+  }
+  if (action === 'delete') {
+    deleteOverlayValue(['usage', 'dailyLimits', key]);
+    if (!persistOrFail(res)) return undefined;
+    return sendJson(res, 200, { ok: true });
+  }
+  if (action !== 'set') {
+    return sendJson(res, 400, { error: { message: `unknown action: ${action}`, type: 'invalid_request_error' } });
+  }
+  const limit = Number(body.limit);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return sendJson(res, 400, { error: { message: 'limit must be a positive number', type: 'invalid_request_error' } });
+  }
+  setOverlayValue(['usage', 'dailyLimits', key], limit);
+  if (!persistOrFail(res)) return undefined;
+  return sendJson(res, 200, { ok: true, key, limit });
+}
+
+// Discovery + evaluation toggles apply immediately; provider switch applies
+// immediately too; the interval needs a restart (it arms the next timer).
+async function handleDiscovery(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const notes = [];
+  if (body.enabled !== undefined) {
+    discoveryEnabled = body.enabled !== false;
+    setOverlayValue(['discovery', 'enabled'], discoveryEnabled);
+  }
+  if (body.evaluationEnabled !== undefined) {
+    evaluationEnabled = body.evaluationEnabled !== false;
+    setOverlayValue(['discovery', 'evaluation', 'enabled'], evaluationEnabled);
+  }
+  if (body.provider !== undefined) {
+    const name = String(body.provider || '');
+    try {
+      registry.setDiscoveryProvider(name);
+    } catch (error) {
+      return sendJson(res, 400, { error: { message: String(error.message || error), type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['discovery', 'provider'], name);
+  }
+  if (body.intervalHours !== undefined) {
+    const hours = Number(body.intervalHours);
+    if (!Number.isFinite(hours) || hours < 1 || hours > 720) {
+      return sendJson(res, 400, { error: { message: 'intervalHours must be 1-720', type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['discovery', 'intervalMs'], Math.round(hours * 3600000));
+    notes.push('interval saved; restart to take effect');
+  }
+  if (body.pin !== undefined || body.unpin !== undefined) {
+    const pinned = new Set(config.discovery?.evaluation?.pinnedModels || [...PINNED_MODELS]);
+    if (body.pin) {
+      const model = String(body.pin).trim();
+      if (!model) {
+        return sendJson(res, 400, { error: { message: 'pin must be a non-empty model id', type: 'invalid_request_error' } });
+      }
+      pinned.add(model);
+      PINNED_MODELS.add(model);
+    }
+    if (body.unpin) {
+      pinned.delete(String(body.unpin));
+      PINNED_MODELS.delete(String(body.unpin));
+    }
+    setOverlayValue(['discovery', 'evaluation', 'pinnedModels'], [...pinned]);
+  }
+  if (!persistOrFail(res)) return undefined;
+  return sendJson(res, 200, { ok: true, notes });
+}
+
+// General tuning knobs. Most apply immediately; host-like values and the
+// usage timezone need a restart and are reported back as notes.
+async function handleSettings(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const notes = [];
+  if (body.attemptTimeoutMs !== undefined) {
+    const value = Number(body.attemptTimeoutMs);
+    if (!Number.isFinite(value) || value < 5000 || value > 900000) {
+      return sendJson(res, 400, { error: { message: 'attemptTimeoutMs must be 5000-900000', type: 'invalid_request_error' } });
+    }
+    attemptTimeoutMs = value;
+    setOverlayValue(['attemptTimeoutMs'], value);
+  }
+  if (body.catalogRefreshMs !== undefined) {
+    const value = Number(body.catalogRefreshMs);
+    if (!Number.isFinite(value) || value < 60000 || value > 86400000) {
+      return sendJson(res, 400, { error: { message: 'catalogRefreshMs must be 60000-86400000', type: 'invalid_request_error' } });
+    }
+    catalogRefreshMs = value;
+    setOverlayValue(['catalogRefreshMs'], value);
+  }
+  if (body.redactSecrets !== undefined) {
+    setOverlayValue(['redactSecrets'], body.redactSecrets !== false);
+    refreshSecretRedactor();
+  }
+  if (body.socksFirstHosts !== undefined) {
+    if (!Array.isArray(body.socksFirstHosts)) {
+      return sendJson(res, 400, { error: { message: 'socksFirstHosts must be an array', type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['socksFirstHosts'], body.socksFirstHosts.map((h) => String(h || '').trim()).filter(Boolean));
+    notes.push('socksFirstHosts saved; restart to take effect');
+  }
+  if (body.defaultProvider !== undefined) {
+    const name = String(body.defaultProvider || '');
+    try {
+      registry.setDefaultProvider(name);
+    } catch (error) {
+      return sendJson(res, 400, { error: { message: String(error.message || error), type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['defaultProvider'], name);
+  }
+  if (body.retentionDays !== undefined) {
+    const value = Number(body.retentionDays);
+    if (!Number.isInteger(value) || value < 1 || value > 90) {
+      return sendJson(res, 400, { error: { message: 'retentionDays must be 1-90', type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['usage', 'retentionDays'], value);
+    notes.push('retentionDays saved; restart to take effect');
+  }
+  if (body.timezone !== undefined) {
+    setOverlayValue(['usage', 'timezone'], String(body.timezone || ''));
+    notes.push('timezone saved; restart to take effect');
+  }
+  if (body.sessionTtlHours !== undefined) {
+    const value = Number(body.sessionTtlHours);
+    if (!Number.isFinite(value) || value < 0 || value > 8760) {
+      return sendJson(res, 400, { error: { message: 'sessionTtlHours must be 0-8760 (0 = never expires)', type: 'invalid_request_error' } });
+    }
+    setOverlayValue(['webui', 'sessionTtlHours'], value);
+    notes.push(value === 0 ? 'sessions never expire' : `sessions expire after ${value} hour(s); existing sessions keep their old expiry`);
+  }
+  if (body.dismissMigrationNotice === true) {
+    deleteOverlayValue(['migratedFromEnv']);
+  }
+  if (!persistOrFail(res)) return undefined;
+  return sendJson(res, 200, { ok: true, notes });
+}
+
+// Graceful restart for applying host/port changes from the web UI.
+// Responds first, then flushes state and exits: process supervisors
+// (docker restart policy, systemd) bring the server back up. Without a
+// supervisor (plain ./start.sh) the process simply stops — the UI says so.
+async function handleRestart(req, res) {
+  sendJson(res, 200, { ok: true });
+  setTimeout(() => {
+    log('restart requested via web interface; exiting for supervisor restart');
+    try {
+      if (stateSaveTimer) flushStateSave();
+    } catch {
+      // Best effort; the process is exiting either way.
+    }
+    try {
+      server.close(() => process.exit(0));
+    } catch {
+      process.exit(0);
+    }
+    setTimeout(() => process.exit(0), 3000).unref?.();
+  }, 300).unref?.();
+}
+
+async function handleLogin(req, res) {
+  let body;
+  try {
+    body = await readJson(req, 64 * 1024);
+  } catch (error) {
+    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
+  }
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!checkWebuiPassword(password)) {
+    return sendJson(res, 401, { error: { message: 'invalid password', type: 'unauthorized' } });
+  }
+  upgradePasswordStorage('login');
+  const token = crypto.randomBytes(32).toString('hex');
+  pruneWebuiSessions();
+  const ttlHours = sessionTtlHours();
+  const expiresAt = ttlHours > 0 ? Date.now() + Math.round(ttlHours * 3600000) : Number.POSITIVE_INFINITY;
+  webuiSessions.set(token, expiresAt);
+  // Cookie lifetime mirrors the server-side TTL; "never" becomes a browser
+  // session cookie so it still dies with the browser.
+  const maxAge = ttlHours > 0 ? `; Max-Age=${Math.round(ttlHours * 3600)}` : '';
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Set-Cookie': `fr_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax${maxAge}`,
+    'Cache-Control': 'no-store',
+  });
+  return res.end(JSON.stringify({
+    ok: true,
+    expiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+  }));
 }
 
 async function handler(req, res) {
@@ -1806,6 +2950,25 @@ async function handler(req, res) {
     });
     return res.end(page);
   }
+  // Login is public (it is the gate itself); logout needs no session either.
+  if (req.method === 'POST' && url.pathname === '/api/login') {
+    return handleLogin(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/logout') {
+    webuiSessions.delete(webuiSessionToken(req));
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Set-Cookie': 'fr_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
+      'Cache-Control': 'no-store',
+    });
+    return res.end(JSON.stringify({ ok: true }));
+  }
+  if (isUiPath && url.pathname.startsWith('/api/')) {
+    const authFailure = webuiAuthFailure(req);
+    if (authFailure) {
+      return sendJson(res, 401, { error: { message: authFailure, type: 'unauthorized' } });
+    }
+  }
   if (req.method === 'GET' && url.pathname === '/api/state') {
     await refreshCatalog();
     return sendJson(
@@ -1814,10 +2977,35 @@ async function handler(req, res) {
       {
         endpoint: `http://${HOST}:${PORT}/v1`,
         envFile: displayPath(UI_ENV_PATH),
+        configFile: displayPath(CONFIG_PATH),
+        configFormat: CONFIG_FORMAT,
+        overlayFile: displayPath(OVERLAY_PATH),
         route: DISCOVERY_ROUTE,
+        server: { host: config.host, port: config.port, runningHost: HOST, runningPort: PORT },
+        gateway: {
+          requireAuth: gatewayAuthRequired(),
+          keys: gatewayKeys().map((entry) => ({
+            name: entry.name,
+            masked: maskSecret(entry.key),
+            createdAt: entry.createdAt || null,
+          })),
+        },
+        webui: {
+          defaultPassword: isDefaultPassword(),
+          sessionTtlHours: sessionTtlHours(),
+          sessionExpiresAt: (() => {
+            const expiresAt = webuiSessions.get(webuiSessionToken(req));
+            return expiresAt === undefined
+              ? null
+              : Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null;
+          })(),
+        },
         providers: uiProviderState(),
         usage: usageSummary(),
         routes: uiRouteState(),
+        migration: config.migratedFromEnv || null,
+        editable: editableConfigState(),
+        allRoutes: routeStatus(),
         unavailableModels: discoveryUnavailableIds,
         excludedByProvider: rejectedConfiguredModels(),
         lastSelection,
@@ -1828,20 +3016,47 @@ async function handler(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/keys') {
     return handleKeyUpdate(req, res);
   }
+  if (req.method === 'POST' && url.pathname === '/api/gateway-keys') {
+    return handleGatewayKeys(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/webui-password') {
+    return handleWebuiPassword(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/server') {
+    return handleServerConfig(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/restart') {
+    return handleRestart(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/providers') {
+    return handleProviders(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/routes') {
+    return handleRoutes(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/limits') {
+    return handleLimits(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/discovery') {
+    return handleDiscovery(req, res);
+  }
+  if (req.method === 'POST' && url.pathname === '/api/settings') {
+    return handleSettings(req, res);
+  }
   if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/v1/health')) {
     return sendJson(res, 200, {
       ok: true,
       service: 'free-router',
       version: VERSION,
       defaultProvider: registry.defaultProvider,
-      catalogModels: registry.discoveryCatalog()?.catalog.size || 0,
+      catalogModels: registry.discoveryCatalog()?.catalog?.size || 0,
       catalogFetchedAt: registry.discoveryCatalog()?.catalogFetchedAt
         ? new Date(registry.discoveryCatalog().catalogFetchedAt).toISOString()
         : null,
       catalogError: registry.discoveryCatalog()?.catalogError || null,
       providers: registry.health(),
       discovery: {
-        enabled: DISCOVERY_ENABLED,
+        enabled: discoveryEnabled,
         provider: registry.discoveryProvider,
         route: DISCOVERY_ROUTE,
         intervalMs: DISCOVERY_INTERVAL_MS,
@@ -1869,6 +3084,10 @@ async function handler(req, res) {
     });
   }
   if (req.method === 'GET' && url.pathname === '/v1/models') {
+    const gatewayFailure = gatewayGuardFailure(req);
+    if (gatewayFailure) {
+      return sendJson(res, 401, { error: { message: gatewayFailure, type: 'unauthorized' } });
+    }
     await refreshCatalog();
     const routeModels = Object.keys(config.routes || {}).map((id) => ({
       id,
@@ -1890,6 +3109,10 @@ async function handler(req, res) {
     });
   }
   if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
+    const gatewayFailure = gatewayGuardFailure(req);
+    if (gatewayFailure) {
+      return sendJson(res, 401, { error: { message: gatewayFailure, type: 'unauthorized' } });
+    }
     return handleChat(req, res);
   }
   return sendJson(res, 404, {
@@ -1915,10 +3138,17 @@ server.headersTimeout = 65000;
 server.keepAliveTimeout = 5000;
 
 server.listen(PORT, HOST, async () => {
-  log(`Free Router ${VERSION} listening on http://${HOST}:${PORT}/v1`);
+  log(`Free Router ${VERSION} listening on http://${HOST}:${PORT}/v1 (config: ${displayPath(CONFIG_PATH)}, ${CONFIG_FORMAT})`);
   if (UI_ENABLED) log(`web interface on http://${HOST}:${PORT}/`);
+  if (gatewayAuthRequired()) {
+    log(`gateway auth enabled (${gatewayKeys().length} API key(s))`);
+  } else {
+    log('warning: gateway auth is disabled; anyone on the network can call /v1');
+  }
+  if (isDefaultPassword()) log('warning: web UI still uses the default password "admin123"');
   for (const provider of PROVIDERS.values()) {
-    if (!provider.apiKey) log(`warning: ${provider.keyEnv} is missing`);
+    if (!registry.hasUsableKey(provider)) log(`warning: ${provider.keyEnv} is missing`);
+    else if (provider.apiKeys.length > 1) log(`${provider.name}: ${provider.apiKeys.length} keys configured`);
   }
   await refreshCatalog(true);
   await discoverFreeModels();
