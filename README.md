@@ -1,9 +1,10 @@
 # Free Router
 
+> English | [中文](docs/zh-CN/README.md)
+
 <p align="center">
   <img src="docs/og.png" alt="Free Router architecture: any OpenAI client to a local gateway to pluggable providers" width="100%">
 </p>
-
 Local OpenAI-compatible gateway. Point any client at
 `http://127.0.0.1:8787/v1` and use `free-best`. It ranks currently free
 models across **any OpenAI-compatible provider you configure**, then fails

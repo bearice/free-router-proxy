@@ -1,5 +1,7 @@
 # How Free Router works
 
+> English | [中文](zh-CN/HOW_IT_WORKS.md)
+
 Technical reference. The short overview lives in the [README](../README.md).
 
 ## Requirements
