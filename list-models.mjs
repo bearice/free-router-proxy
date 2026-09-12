@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildLiveConfig, defaultConfigPath, loadConfigFile, loadOverlayFile } from './config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,10 +29,22 @@ for (const file of [path.join(HERE, '.env'), path.join(os.homedir(), '.hermes', 
   loadEnvFile(file);
 }
 
-const CONFIG_PATH = process.env.FREE_ROUTER_CONFIG || path.join(HERE, 'config.json');
-const config = fs.existsSync(CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-  : {};
+const CONFIG_PATH = process.env.FREE_ROUTER_CONFIG || defaultConfigPath(HERE);
+// Same layered view as the server: tracked defaults + operator overlay.
+function loadConfigLite(configPath) {
+  if (!fs.existsSync(configPath)) return {};
+  try {
+    const base = loadConfigFile(configPath).config;
+    const overlayPath = path.join(path.dirname(configPath), 'config.local.json');
+    const { overlay } = loadOverlayFile(overlayPath);
+    return buildLiveConfig(base, overlay);
+  } catch {
+    return {};
+  }
+}
+const config = loadConfigLite(CONFIG_PATH);
+const GATEWAY_KEY = process.env.FREE_ROUTER_API_KEY || '';
+const authHeaders = GATEWAY_KEY ? { Authorization: `Bearer ${GATEWAY_KEY}` } : {};
 const HOST = process.env.FREE_ROUTER_HOST || config.host || '127.0.0.1';
 const PORT = Number(process.env.FREE_ROUTER_PORT || config.port || 8787);
 const DEFAULT_ROUTE = config.discovery?.route || 'free-best';
@@ -238,7 +251,7 @@ async function main() {
   const url = `http://${HOST}:${PORT}/health`;
   let health;
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000), headers: authHeaders });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     health = await response.json();
   } catch (error) {
