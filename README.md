@@ -11,8 +11,6 @@ models across **any OpenAI-compatible provider you configure**, then fails
 over when one is rate-limited, down, or empty. A missing key just drops that
 provider.
 
-Site: [www222fff.github.io/free-router-proxy](https://www222fff.github.io/free-router-proxy/)
-
 ## Run
 
 Node.js 20+. Copy `.env.example` to `.env`, add at least one provider key,

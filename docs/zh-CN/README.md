@@ -11,8 +11,6 @@
 OpenAI 兼容 provider** 的当前免费模型做排名，遇到限流、宕机或空回复时
 自动 Failover。缺 Key 的 provider 直接被跳过。
 
-站点：[www222fff.github.io/free-router-proxy](https://www222fff.github.io/free-router-proxy/)
-
 ## 运行
 
 Node.js 20+。把 `.env.example` 复制为 `.env`，填至少一个 provider 的 Key，
