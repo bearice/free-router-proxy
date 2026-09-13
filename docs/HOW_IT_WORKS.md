@@ -49,8 +49,8 @@ URLs, and the OpenRouter app title/referer.
 ## Run
 
 ```bash
-git clone https://github.com/www222fff/free-router.git
-cd free-router
+git clone https://github.com/www222fff/free-router-proxy.git
+cd free-router-proxy
 cp .env.example .env
 # edit .env and set the keys you have
 ./start.sh
@@ -63,8 +63,8 @@ directory owner and refuse to stay root.
 ## Run with Docker
 
 ```bash
-git clone https://github.com/www222fff/free-router.git
-cd free-router
+git clone https://github.com/www222fff/free-router-proxy.git
+cd free-router-proxy
 cp .env.example .env
 # edit .env and set the keys you have
 docker compose up -d
@@ -583,15 +583,15 @@ its own `usage` block.
 
 ## systemd user service
 
-The unit assumes the repo lives at `~/free-router`. If you cloned somewhere
+The unit assumes the repo lives at `~/free-router-proxy`. If you cloned somewhere
 else, edit `WorkingDirectory` and `ExecStart` before enabling it.
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp free-router.service ~/.config/systemd/user/
+cp free-router-proxy.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now free-router
-journalctl --user -u free-router -f
+systemctl --user enable --now free-router-proxy
+journalctl --user -u free-router-proxy -f
 ```
 
 `./start.sh` also works without systemd.

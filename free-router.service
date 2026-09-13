@@ -1,14 +1,14 @@
 [Unit]
-Description=Free Router local model gateway
+Description=Free Router Proxy local model gateway
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/free-router
+WorkingDirectory=%h/free-router-proxy
 EnvironmentFile=-%h/.hermes/.env
-EnvironmentFile=-%h/free-router/.env
-ExecStart=/usr/bin/node %h/free-router/server.mjs
+EnvironmentFile=-%h/free-router-proxy/.env
+ExecStart=/usr/bin/node %h/free-router-proxy/server.mjs
 Restart=on-failure
 RestartSec=3
 

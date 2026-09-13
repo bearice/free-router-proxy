@@ -48,8 +48,8 @@ app 标题/referer。
 ## 运行
 
 ```bash
-git clone https://github.com/www222fff/free-router.git
-cd free-router
+git clone https://github.com/www222fff/free-router-proxy.git
+cd free-router-proxy
 cp .env.example .env
 # 编辑 .env，填上你有的 Key
 ./start.sh
@@ -61,8 +61,8 @@ cp .env.example .env
 ## Docker 运行
 
 ```bash
-git clone https://github.com/www222fff/free-router.git
-cd free-router
+git clone https://github.com/www222fff/free-router-proxy.git
+cd free-router-proxy
 cp .env.example .env
 # 编辑 .env，填上你有的 Key
 docker compose up -d
@@ -522,15 +522,15 @@ serve 了、谁快摸到免费日 cap。计数器和发现状态住同一个
 
 ## systemd 用户服务
 
-unit 默认仓库在 `~/free-router`，clone 到别处先改 `WorkingDirectory`
+unit 默认仓库在 `~/free-router-proxy`，clone 到别处先改 `WorkingDirectory`
 和 `ExecStart` 再 enable。
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp free-router.service ~/.config/systemd/user/
+cp free-router-proxy.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now free-router
-journalctl --user -u free-router -f
+systemctl --user enable --now free-router-proxy
+journalctl --user -u free-router-proxy -f
 ```
 
 不用 systemd 就 `./start.sh`。

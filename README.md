@@ -11,7 +11,7 @@ models across **any OpenAI-compatible provider you configure**, then fails
 over when one is rate-limited, down, or empty. A missing key just drops that
 provider.
 
-Site: [www222fff.github.io/free-router](https://www222fff.github.io/free-router/)
+Site: [www222fff.github.io/free-router-proxy](https://www222fff.github.io/free-router-proxy/)
 
 ## Run
 
@@ -19,8 +19,8 @@ Node.js 20+. Copy `.env.example` to `.env`, add at least one provider key,
 then:
 
 ```bash
-git clone https://github.com/www222fff/free-router.git
-cd free-router
+git clone https://github.com/www222fff/free-router-proxy.git
+cd free-router-proxy
 cp .env.example .env
 ./start.sh
 ```
@@ -79,7 +79,7 @@ the environment, so `.env` remains a valid key store that never needs a UI.
 ## Star History
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router&type=Date&theme=dark" />
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router&type=Date" />
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=www222fff/free-router&type=Date" />
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router-proxy&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router-proxy&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=www222fff/free-router-proxy&type=Date" />
 </picture>

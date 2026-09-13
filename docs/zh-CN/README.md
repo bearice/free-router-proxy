@@ -11,7 +11,7 @@
 OpenAI 兼容 provider** 的当前免费模型做排名，遇到限流、宕机或空回复时
 自动 Failover。缺 Key 的 provider 直接被跳过。
 
-站点：[www222fff.github.io/free-router](https://www222fff.github.io/free-router/)
+站点：[www222fff.github.io/free-router-proxy](https://www222fff.github.io/free-router-proxy/)
 
 ## 运行
 
@@ -19,8 +19,8 @@ Node.js 20+。把 `.env.example` 复制为 `.env`，填至少一个 provider 的
 然后：
 
 ```bash
-git clone https://github.com/www222fff/free-router.git
-cd free-router
+git clone https://github.com/www222fff/free-router-proxy.git
+cd free-router-proxy
 cp .env.example .env
 ./start.sh
 ```
@@ -77,7 +77,7 @@ curl -s http://<lan-ip>:8787/v1/chat/completions \
 ## Star History
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router&type=Date&theme=dark" />
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router&type=Date" />
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=www222fff/free-router&type=Date" />
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router-proxy&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=www222fff/free-router-proxy&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=www222fff/free-router-proxy&type=Date" />
 </picture>

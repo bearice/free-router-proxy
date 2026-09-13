@@ -1,7 +1,7 @@
 services:
-  free-router:
+  free-router-proxy:
     build: .
-    container_name: free-router
+    container_name: free-router-proxy
     restart: unless-stopped
     env_file:
       - .env
