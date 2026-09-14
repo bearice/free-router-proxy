@@ -7,7 +7,68 @@ const MAX_SECRET_LENGTH = 500;
 // Language content lives in i18n.mjs; the page gets a frozen copy so the
 // browser needs no module loader. `</script>` can never appear in it: values
 // only use <span> markup (verified in tests via renderPage snapshot).
-const I18N_PAYLOAD = JSON.stringify({ langs: LANGS, strings: STRINGS });
+const removedI18nKey = (key) =>
+  key === 'tab_access' ||
+  key === 'tab_quota' ||
+  key === 'tab_settings' ||
+  key === 'logout' ||
+  key === 'require_auth' ||
+  key === 'goto_access' ||
+  key === 'card_config' ||
+  key === 'card_gateway' ||
+  key === 'card_adminpw' ||
+  key === 'prov_counts' ||
+  key === 'prov_label_ph' ||
+  key === 'usage_today' ||
+  key === 'usage_blurb' ||
+  key === 'usage_empty' ||
+  key === 'th_today' ||
+  key === 'th_ok' ||
+  key === 'th_fail' ||
+  key === 'th_limit' ||
+  key === 'th_limit_day' ||
+  key === 'th_source' ||
+  key === 'add_provider' ||
+  key === 'add_provider_blurb' ||
+  key === 'del_provider' ||
+  key === 'confirm_del_provider' ||
+  key === 'deleted_provider' ||
+  key === 'pinned_msg' ||
+  key === 'unpinned_msg' ||
+  key === 'rm_model_title' ||
+  key === 'removed_model' ||
+  key === 'added_model' ||
+  key === 'adminpw_warn' ||
+  key === 'mig_gw' ||
+  key === 'srv_host' ||
+  key === 'srv_note' ||
+  key === 'err_admin_pass' ||
+  key.startsWith('login_') ||
+  key.startsWith('access_') ||
+  key.startsWith('gw_') ||
+  key.startsWith('admin_') ||
+  key.startsWith('sess_') ||
+  key.startsWith('np_') ||
+  key.startsWith('limit_') ||
+  key.startsWith('limits_') ||
+  key.startsWith('disc_') ||
+  key.startsWith('pin_') ||
+  key.startsWith('unpinned_') ||
+  key.startsWith('server_') ||
+  key.startsWith('srv_') ||
+  key.startsWith('restart_') ||
+  key.startsWith('tuning_') ||
+  key.startsWith('tun_') ||
+  key.startsWith('adv_') ||
+  key.startsWith('url_') ||
+  key.startsWith('fm_');
+const UI_STRINGS = Object.fromEntries(
+  Object.entries(STRINGS).map(([lang, strings]) => [
+    lang,
+    Object.fromEntries(Object.entries(strings).filter(([key]) => !removedI18nKey(key))),
+  ]),
+);
+const I18N_PAYLOAD = JSON.stringify({ langs: LANGS, strings: UI_STRINGS });
 
 // Keeps the operator's username out of the interface and the log file, which
 // both get shared or screenshotted more often than they get read locally.
@@ -24,8 +85,8 @@ export function displayPath(target) {
 export function maskSecret(value) {
   const text = String(value || '');
   if (!text) return '';
-  if (text.length <= 12) return `${'*'.repeat(text.length)} (${text.length})`;
-  return `${text.slice(0, 5)}${'*'.repeat(8)}${text.slice(-4)} (${text.length})`;
+  if (text.length <= 12) return '*'.repeat(text.length);
+  return `${text.slice(0, 5)}${'*'.repeat(8)}${text.slice(-4)}`;
 }
 
 // A newline would let one field append unrelated assignments to .env, which
@@ -128,23 +189,20 @@ header {
 #lang { max-width: 150px; }
 #logout-top { padding: 6px 12px; font-size: 12.5px; }
 h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -.2px; }
-.head-inner .sep { color: var(--line); }
-.head-inner .mono {
-  font-size: 12.5px; color: var(--muted);
-  background: var(--accent-soft); padding: 3px 12px; border-radius: 999px;
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
 main { max-width: 1040px; margin: 0 auto; padding: 28px; display: grid; gap: 26px; }
 
 section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
 .sec-head { padding: 18px 22px 0; }
 .sec-head h2 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -.1px; }
 .sec-head p { margin: 5px 0 0; font-size: 13px; color: var(--muted); max-width: 74ch; }
-.sec-body { padding: 14px 22px 20px; }
+.sec-head .key-instruction {
+  display: inline-block; max-width: none; padding: 4px 9px; border-radius: 7px;
+  background: var(--accent-soft); color: var(--accent); font-weight: 650;
+}
+.sec-body { padding: 14px 22px 20px; overflow-x: auto; }
 
 .prov {
-  display: grid; grid-template-columns: minmax(160px, 210px) 1fr auto;
+  display: grid; grid-template-columns: minmax(120px, 180px) 1fr;
   gap: 18px; align-items: start;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px;
   padding: 16px 18px;
@@ -165,7 +223,6 @@ section { background: var(--card); border: 1px solid var(--line); border-radius:
   box-shadow: 0 0 0 3px rgba(11, 98, 214, .13);
 }
 .prov-hint { margin-top: 7px; font-size: 12px; color: var(--muted); }
-.prov-actions { display: flex; gap: 8px; align-items: center; padding-top: 3px; }
 
 button {
   padding: 9px 15px; border-radius: 8px; font-size: 13px; font-weight: 550;
@@ -227,11 +284,6 @@ tbody tr:hover { background: #fafbfc; }
   font-size: 13px; border-top: 1px solid var(--line-soft);
 }
 .keyrow .mono { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-#login main { padding-top: 60px; }
-#login section { border-radius: 16px; box-shadow: 0 14px 44px rgba(20, 28, 40, .14); }
-
-details summary::marker { color: var(--accent); }
-
 #tabs {
   position: sticky; top: 0; z-index: 5;
   display: flex; gap: 4px; flex-wrap: wrap;
@@ -248,6 +300,7 @@ details summary::marker { color: var(--accent); }
   box-shadow: 0 2px 8px rgba(11, 98, 214, .3);
 }
 #tabs button.active:hover { background: #0954b5; }
+#tabs button[data-tab="status"] { margin-left: auto; }
 
 /* Tab panes stack their cards with a fixed gap (main's grid gap does not
    reach inside the pane wrapper). */
@@ -267,15 +320,6 @@ select {
   background: #fff; color: var(--text); font-size: 13px; max-width: 280px;
 }
 
-.chip {
-  display: inline-flex; gap: 8px; align-items: center;
-  border: 1px solid var(--line); border-radius: 999px;
-  padding: 4px 8px 4px 12px; margin: 0 8px 8px 0; font-size: 12.5px;
-  background: #f6f8fb;
-}
-.chip .mono { font-size: 12px; }
-.chip button { padding: 2px 9px; font-size: 12px; }
-
 .entry {
   display: flex; gap: 8px; align-items: center; padding: 7px 0;
   border-top: 1px solid var(--line-soft); font-size: 13px;
@@ -287,25 +331,6 @@ select {
 .warn { color: var(--warn); font-weight: 600; }
 .bad-text { color: var(--bad); font-weight: 600; }
 .ok-text { color: var(--ok); font-weight: 600; }
-
-/* Title row with a trailing switch (Access pane). */
-.head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.head-row > div { flex: 1; min-width: 0; }
-.title-switch { display: flex; align-items: center; gap: 10px; }
-.title-switch .switch { margin-top: 0; }
-.switch { position: relative; display: inline-block; width: 44px; height: 24px; flex: none; margin-top: 2px; }
-.switch input { opacity: 0; width: 0; height: 0; }
-.switch .slider {
-  position: absolute; inset: 0; cursor: pointer;
-  background: #ccd2db; border-radius: 999px; transition: .18s;
-}
-.switch .slider:before {
-  content: ""; position: absolute; height: 18px; width: 18px;
-  left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .18s;
-  box-shadow: 0 1px 3px rgba(0,0,0,.25);
-}
-.switch input:checked + .slider { background: var(--accent); }
-.switch input:checked + .slider:before { transform: translateX(20px); }
 
 /* One-time migration notice. */
 .banner {
@@ -332,10 +357,9 @@ select {
   button.primary { background: var(--accent); border-color: var(--accent); color: #0c1116; }
   button.primary:hover { background: #6aa5f3; }
   tbody tr:hover { background: #22282f; }
-  .card, .chip { background: #22282f; }
+  .card { background: #22282f; }
   .prov:hover { border-color: #3a424d; box-shadow: 0 4px 16px rgba(0, 0, 0, .35); }
   .iconbtn { background: #262c35; border-color: #3a424d; }
-  .switch .slider { background: #3a424d; }
 }
 
 #toast {
@@ -352,6 +376,10 @@ select {
 @media (max-width: 760px) {
   .prov { grid-template-columns: 1fr; gap: 10px; }
   .prov-name { padding-top: 0; }
+  .entry { flex-wrap: wrap; }
+  .entry .mono { min-width: calc(100% - 110px); }
+  #tabs button { flex: 1; }
+  #tabs button[data-tab="status"] { margin-left: 0; }
   main, header { padding-left: 18px; padding-right: 18px; }
 }
 </style>
@@ -360,21 +388,15 @@ select {
 <header>
   <div class="head-inner">
     <h1>Free Router</h1>
-    <span class="sep">/</span>
-    <span class="mono" id="endpoint"></span>
     <span class="head-spacer"></span>
     <select id="lang" title="Language"></select>
-    <button id="logout-top" class="quiet" style="display:none" data-i18n="logout">Log out</button>
   </div>
 </header>
-<main id="app" style="display:none">
+<main id="app">
   <nav id="tabs">
-    <button data-tab="status" class="active" data-i18n="tab_status">Status</button>
-    <button data-tab="access" data-i18n="tab_access">Access</button>
     <button data-tab="providers" data-i18n="tab_providers">Providers</button>
     <button data-tab="routes" data-i18n="tab_routes">Routes</button>
-    <button data-tab="quota" data-i18n="tab_quota">Quota</button>
-    <button data-tab="settings" data-i18n="tab_settings">Settings</button>
+    <button data-tab="status" class="active" data-i18n="tab_status">Status</button>
   </nav>
 
   <div data-pane="status">
@@ -389,55 +411,17 @@ select {
       </div>
       <div class="sec-body"><div id="routes"></div></div>
     </section>
-    <section>
-      <div class="sec-head"><h2 data-i18n="usage_today">Usage today</h2><p id="usage-blurb"></p></div>
-      <div class="sec-body"><div id="usage"></div></div>
-    </section>
-  </div>
-
-  <div data-pane="access" hidden>
-    <section>
-      <div class="sec-head">
-        <h2 class="title-switch"><span data-i18n="access_title">API key access</span> <label class="switch" data-i18n-title="require_auth"><input type="checkbox" id="gw-require"><span class="slider"></span></label></h2>
-        <p data-i18n="access_blurb">Gateway API keys for LAN clients (send as <span class="mono">Authorization: Bearer &lt;key&gt;</span> on <span class="mono">/v1/*</span>). Creating the first key enables auth; deleting the last one disables it.</p>
-      </div>
-      <div class="sec-body">
-        <div id="gateway"></div>
-        <div class="row">
-          <input id="gw-name" data-i18n-ph="gw_name_ph" placeholder="Label, e.g. living-room laptop" style="max-width:260px">
-          <button class="primary" id="gw-create" data-i18n="gw_create">Create API key</button>
-        </div>
-        <p class="note" id="gw-note"></p>
-      </div>
-    </section>
   </div>
 
   <div data-pane="providers" hidden>
     <section>
       <div class="sec-head">
         <h2 data-i18n="providers_title">Provider keys</h2>
-        <p id="keys-blurb"></p>
+        <p class="key-instruction" data-i18n="keys_blurb">Paste one or more keys separated by commas, for example: key1,key2,key3</p>
       </div>
       <div class="sec-body">
         <div id="migrate-banner" class="banner" hidden></div>
         <div id="providers"></div>
-      </div>
-    </section>
-    <section>
-      <div class="sec-head"><h2 data-i18n="add_provider">Add provider</h2><p data-i18n="add_provider_blurb">Any OpenAI-compatible endpoint. After adding, paste its key above.</p></div>
-      <div class="sec-body">
-        <div class="row">
-          <input id="np-name" data-i18n-ph="np_name_ph" placeholder="name: groq" style="max-width:150px">
-          <input id="np-baseurl" class="mono" data-i18n-ph="np_url_ph" placeholder="https://api.groq.com/openai/v1" style="flex:1;min-width:220px">
-        </div>
-        <div class="row">
-          <input id="np-freemodels" class="mono" data-i18n-ph="np_fm_ph" placeholder="free models, comma separated (for APIs without prices)" style="flex:1;min-width:220px">
-        </div>
-        <div class="row">
-          <label class="check"><input type="checkbox" id="np-catalog" checked> <span data-i18n="np_catalog">catalog (/models)</span></label>
-          <label class="check"><input type="checkbox" id="np-pricing" checked> <span data-i18n="np_pricing">publishes prices</span></label>
-          <button class="primary" id="np-create" data-i18n="np_create">Add provider</button>
-        </div>
       </div>
     </section>
   </div>
@@ -462,112 +446,7 @@ select {
     </section>
   </div>
 
-  <div data-pane="quota" hidden>
-    <section>
-      <div class="sec-head"><h2 data-i18n="limits_title">Daily limits</h2><p data-i18n="limits_blurb">Config quota per model. Limits reported by the provider itself stay authoritative.</p></div>
-      <div class="sec-body">
-        <div id="limits-table"></div>
-        <div class="row">
-          <input id="limit-key" class="mono" data-i18n-ph="limit_key_ph" placeholder="provider:model" style="max-width:260px">
-          <input id="limit-val" class="mono" data-i18n-ph="limit_val_ph" placeholder="requests/day" style="max-width:140px">
-          <button class="primary" id="limit-add" data-i18n="limit_add">Set limit</button>
-        </div>
-      </div>
-    </section>
-    <section>
-      <div class="sec-head"><h2 data-i18n="disc_title">Discovery</h2><p data-i18n="disc_blurb">Automatic free-model discovery and ranking.</p></div>
-      <div class="sec-body">
-        <div class="row">
-          <label class="check"><input type="checkbox" id="disc-enabled"> <span data-i18n="disc_enabled">discovery enabled</span></label>
-          <label class="check"><input type="checkbox" id="disc-eval"> <span data-i18n="disc_eval">model evaluation</span></label>
-        </div>
-        <div class="row">
-          <label><span data-i18n="disc_provider">Provider</span> <select id="disc-provider"></select></label>
-          <label><span data-i18n="disc_interval">Interval (hours)</span> <input id="disc-interval" class="mono" style="max-width:90px"></label>
-          <button id="disc-save" data-i18n="disc_save">Save</button>
-        </div>
-        <p class="note" id="disc-note"></p>
-        <div id="pinned-list"></div>
-        <div class="row">
-          <input id="pin-input" class="mono" data-i18n-ph="pin_ph" placeholder="pin model, e.g. gemini:gemini-3.8-flash" style="flex:1;min-width:200px">
-          <button id="pin-add" data-i18n="pin_add">Pin</button>
-        </div>
-      </div>
-    </section>
-  </div>
-
-  <div data-pane="settings" hidden>
-    <section>
-      <div class="sec-head">
-        <h2 data-i18n="server_title">Server</h2>
-        <p id="server-blurb"></p>
-      </div>
-      <div class="sec-body">
-        <div class="row">
-          <label><span data-i18n="srv_host">Host</span> <input id="srv-host" class="mono" style="max-width:200px"></label>
-          <label><span data-i18n="srv_port">Port</span> <input id="srv-port" class="mono" style="max-width:100px"></label>
-          <button id="srv-save" data-i18n="srv_save">Save</button>
-          <button id="srv-restart" data-i18n="restart_btn">Restart</button>
-        </div>
-        <p class="note" data-i18n="srv_note">Bind <span class="mono">0.0.0.0</span> to allow LAN access. Keep the admin password set. Host and port changes need a restart — use the Restart button.</p>
-      </div>
-    </section>
-    <section>
-      <div class="sec-head"><h2 data-i18n="tuning_title">Tuning</h2><p data-i18n="tuning_blurb">Timeouts apply immediately; proxy and retention settings need a restart.</p></div>
-      <div class="sec-body">
-        <div class="row">
-          <label><span data-i18n="tun_timeout">Attempt timeout (ms)</span> <input id="set-timeout" class="mono" style="max-width:120px"></label>
-          <label><span data-i18n="tun_refresh">Catalog refresh (ms)</span> <input id="set-refresh" class="mono" style="max-width:130px"></label>
-          <label class="check"><input type="checkbox" id="set-redact"> <span data-i18n="tun_redact">redact secrets</span></label>
-        </div>
-        <div class="row">
-          <label><span data-i18n="tun_default">Default provider</span> <select id="set-default"></select></label>
-        </div>
-        <div class="row">
-          <input id="set-socks" class="mono" data-i18n-ph="tun_socks_ph" placeholder="socks-first hosts, comma separated" style="flex:1;min-width:200px">
-        </div>
-        <div class="row">
-          <label><span data-i18n="tun_retention">Usage retention (days)</span> <input id="set-retention" class="mono" style="max-width:80px"></label>
-          <label><span data-i18n="tun_timezone">Timezone</span> <input id="set-timezone" class="mono" data-i18n-ph="tun_timezone_ph" placeholder="America/Los_Angeles" style="max-width:200px"></label>
-          <button class="primary" id="set-save" data-i18n="tun_save">Save tuning</button>
-        </div>
-        <p class="note" id="set-note"></p>
-      </div>
-    </section>
-    <section>
-      <div class="sec-head">
-        <h2 data-i18n="admin_title">Admin</h2>
-        <p data-i18n="admin_blurb">Web UI password (default <span class="mono">admin123</span>). Changing it logs out all sessions.</p>
-      </div>
-      <div class="sec-body">
-        <div class="row">
-          <input id="admin-pass" type="password" data-i18n-ph="admin_pass_ph" placeholder="New admin password" style="max-width:260px">
-          <button class="primary" id="admin-save" data-i18n="admin_save">Change password</button>
-          <button class="quiet" id="logout" data-i18n="logout">Log out</button>
-        </div>
-        <div class="row">
-          <label><span data-i18n="sess_ttl">Session expires after</span>
-            <select id="sess-preset"></select>
-          </label>
-          <button id="sess-save" data-i18n="sess_save">Save session</button>
-        </div>
-        <p class="note" id="sess-note"></p>
-      </div>
-    </section>
-  </div>
 </main>
-<div id="login" style="display:none">
-  <main style="max-width:440px">
-    <section><div class="sec-body" style="padding:26px">
-      <h2 style="margin:0 0 4px">Free Router</h2>
-      <p class="note" style="margin:0 0 14px" data-i18n="login_blurb">Enter the admin password to continue.</p>
-      <div class="row">
-        <input id="login-pass" type="password" data-i18n-ph="login_pass_ph" placeholder="Default admin123" style="flex:1">
-        <button class="primary" id="login-go" data-i18n="login_go">Log in</button>
-      </div>
-    </div></section>
-  </main>
-</div>
 <div id="toast"></div>
 <script>window.FR_I18N = ${I18N_PAYLOAD};</script>
 <script>
@@ -651,17 +530,10 @@ function setLang(code) {
 function renderAll() {
   switchTab(activeTab);
   renderStatus();
-  renderGateway();
-  renderServer();
   renderProviders();
   renderRoutes();
-  renderUsage();
   renderRouteEditor();
-  renderLimits();
-  renderDiscovery();
-  renderTuning();
   renderMigration();
-  renderSession();
 }
 
 
@@ -734,15 +606,6 @@ function renderProviders() {
     const name = document.createElement('div');
     name.className = 'prov-name';
     name.textContent = provider.name;
-    const env = document.createElement('span');
-    env.className = 'mono';
-    env.textContent = t('prov_counts', {
-      env: provider.keyEnv,
-      k: provider.keyCount || 0,
-      m: provider.modelCount === null || provider.modelCount === undefined ? '?' : provider.modelCount,
-      f: provider.freeCount === null || provider.freeCount === undefined ? '?' : provider.freeCount,
-    });
-    name.appendChild(env);
 
     const fieldCell = document.createElement('div');
     fieldCell.className = 'prov-field';
@@ -783,9 +646,6 @@ function renderProviders() {
 
     const addRow = document.createElement('div');
     addRow.className = 'row';
-    const nameField = document.createElement('input');
-    nameField.placeholder = t('prov_label_ph');
-    nameField.style.maxWidth = '150px';
     const keyField = document.createElement('input');
     keyField.type = 'password';
     keyField.autocomplete = 'off';
@@ -796,23 +656,30 @@ function renderProviders() {
     add.className = 'primary';
     add.textContent = fileKeys.length ? t('prov_add') : t('prov_save');
     add.onclick = async () => {
-      const value = keyField.value.trim();
-      const label = nameField.value.trim() || ('key-' + ((provider.keyCount || 0) + 1));
-      if (!value) { toast(t('prov_empty'), 'err'); return; }
+      const values = [...new Set(keyField.value.split(',').map((value) => value.trim()).filter(Boolean))];
+      const names = new Set((provider.keys || []).map((entry) => entry.name));
+      if (!values.length) { toast(t('prov_empty'), 'err'); return; }
       add.disabled = true;
       try {
-        await api('api/keys', {
-          method: 'POST',
-          body: JSON.stringify({ provider: provider.name, name: label, key: value }),
-        });
-        toast(t('prov_saved', { n: label, p: provider.name }), 'good');
+        const labels = [];
+        for (const value of values) {
+          let next = 1;
+          while (names.has('key-' + next)) next += 1;
+          const label = 'key-' + next;
+          await api('api/keys', {
+            method: 'POST',
+            body: JSON.stringify({ provider: provider.name, name: label, key: value }),
+          });
+          names.add(label);
+          labels.push(label);
+        }
+        toast(t('prov_saved', { n: labels.join(', '), p: provider.name }), 'good');
         await load();
       } catch (error) {
         toast(String(error.message || error), 'err');
         add.disabled = false;
       }
     };
-    addRow.appendChild(nameField);
     addRow.appendChild(keyField);
     addRow.appendChild(add);
     fieldCell.appendChild(addRow);
@@ -845,199 +712,10 @@ function renderProviders() {
       fieldCell.appendChild(gone);
     }
 
-    const adv = document.createElement('details');
-    const summary = document.createElement('summary');
-    summary.textContent = t('adv_title');
-    summary.style.cssText = 'cursor:pointer;font-size:12.5px;color:var(--muted);margin-top:8px';
-    adv.appendChild(summary);
-    const detail = state.editable.providers.find((entry) => entry.name === provider.name) || {};
-    const urlRow = document.createElement('div');
-    urlRow.className = 'row';
-    const urlField = document.createElement('input');
-    urlField.className = 'mono';
-    urlField.value = detail.baseUrl || '';
-    urlField.style.flex = '1';
-    urlField.placeholder = t('url_ph');
-    const urlSave = document.createElement('button');
-    urlSave.textContent = t('url_save');
-    urlSave.onclick = async () => {
-      urlSave.disabled = true;
-      try {
-        const result = await api('api/providers', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'update', name: provider.name, baseUrl: urlField.value.trim() }),
-        });
-        toast(t('saved') + ((result.notes || []).length ? ' ' + result.notes.join(' ') : ''), 'good');
-        await load();
-      } catch (error) {
-        toast(String(error.message || error), 'err');
-        urlSave.disabled = false;
-      }
-    };
-    urlRow.appendChild(urlField);
-    urlRow.appendChild(urlSave);
-    adv.appendChild(urlRow);
-
-    const fmWrap = document.createElement('div');
-    fmWrap.style.marginTop = '8px';
-    const fmLabel = document.createElement('div');
-    fmLabel.className = 'prov-hint';
-    fmLabel.textContent = detail.pricing ? t('fm_priced') : t('fm_allow');
-    fmWrap.appendChild(fmLabel);
-    for (const model of detail.freeModels || []) {
-      const chip = document.createElement('span');
-      chip.className = 'chip';
-      const id = document.createElement('span');
-      id.className = 'mono';
-      id.textContent = model;
-      const rm = document.createElement('button');
-      rm.className = 'quiet';
-      rm.textContent = '×';
-      rm.title = t('rm_model_title', { m: model });
-      rm.onclick = async () => {
-        try {
-          await api('api/providers', {
-            method: 'POST',
-            body: JSON.stringify({
-              action: 'update',
-              name: provider.name,
-              freeModels: (detail.freeModels || []).filter((entry) => entry !== model),
-            }),
-          });
-          toast(t('removed_model', { m: model }), 'good');
-          await load();
-        } catch (error) {
-          toast(String(error.message || error), 'err');
-        }
-      };
-      chip.appendChild(id);
-      chip.appendChild(rm);
-      fmWrap.appendChild(chip);
-    }
-    const fmRow = document.createElement('div');
-    fmRow.className = 'row';
-    const fmField = document.createElement('input');
-    fmField.className = 'mono';
-    fmField.placeholder = t('fm_add_ph');
-    fmField.style.maxWidth = '240px';
-    const fmAdd = document.createElement('button');
-    fmAdd.textContent = t('fm_add');
-    fmAdd.onclick = async () => {
-      const value = fmField.value.trim();
-      if (!value) return;
-      try {
-        await api('api/providers', {
-          method: 'POST',
-          body: JSON.stringify({
-            action: 'update',
-            name: provider.name,
-            freeModels: [...(detail.freeModels || []), value],
-          }),
-        });
-        toast(t('added_model', { m: value }), 'good');
-        await load();
-      } catch (error) {
-        toast(String(error.message || error), 'err');
-      }
-    };
-    fmRow.appendChild(fmField);
-    fmRow.appendChild(fmAdd);
-    fmWrap.appendChild(fmRow);
-    adv.appendChild(fmWrap);
-
-    const delRow = document.createElement('div');
-    delRow.className = 'row';
-    const delProv = document.createElement('button');
-    delProv.className = 'quiet';
-    delProv.textContent = t('del_provider');
-    delProv.onclick = async () => {
-      if (!confirm(t('confirm_del_provider', { p: provider.name }))) return;
-      try {
-        const result = await api('api/providers', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'delete', name: provider.name }),
-        });
-        toast(t('deleted_provider', { p: provider.name, n: result.purged || 0 }), 'good');
-        await load();
-      } catch (error) {
-        toast(String(error.message || error), 'err');
-      }
-    };
-    delRow.appendChild(delProv);
-    adv.appendChild(delRow);
-    fieldCell.appendChild(adv);
-
-    const actions = document.createElement('div');
-    actions.className = 'prov-actions';
-
     row.appendChild(name);
     row.appendChild(fieldCell);
-    row.appendChild(actions);
     host.appendChild(row);
   }
-  el('keys-blurb').textContent = t('keys_blurb', { file: state.overlayFile, format: state.configFormat });
-}
-
-function renderGateway() {
-  const host = el('gateway');
-  host.textContent = '';
-  const keys = (state.gateway && state.gateway.keys) || [];
-  if (!keys.length) {
-    const p = document.createElement('p');
-    p.className = 'note';
-    p.style.margin = '0';
-    p.textContent = t('gw_no_keys');
-    host.appendChild(p);
-  }
-  for (const entry of keys) {
-    const line = document.createElement('div');
-    line.className = 'keyrow';
-    const label = document.createElement('span');
-    label.textContent = entry.name;
-    const masked = document.createElement('span');
-    masked.className = 'mono';
-    masked.textContent = entry.masked + (entry.createdAt ? ' · ' + entry.createdAt.slice(0, 10) : '');
-    const del = document.createElement('button');
-    del.className = 'quiet';
-    del.textContent = t('del');
-    del.onclick = async () => {
-      if (!confirm(t('gw_confirm_del', { n: entry.name }))) return;
-      del.disabled = true;
-      try {
-        await api('api/gateway-keys', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'delete', name: entry.name }),
-        });
-        toast(t('gw_deleted', { n: entry.name }), 'good');
-        await load();
-      } catch (error) {
-        toast(String(error.message || error), 'err');
-        del.disabled = false;
-      }
-    };
-    line.appendChild(label);
-    line.appendChild(masked);
-    line.appendChild(del);
-    host.appendChild(line);
-  }
-  el('gw-require').checked = Boolean(state.gateway && state.gateway.requireAuth);
-  el('gw-note').textContent = keys.length
-    ? 'Clients call: curl -H "Authorization: Bearer <key>" ' + state.endpoint + '/chat/completions'
-    : '';
-}
-
-function renderServer() {
-  el('server-blurb').textContent =
-    'Config: ' + state.configFile + ' (' + state.configFormat + '). Running on ' + state.server.runningHost + ':' + state.server.runningPort + '.';
-  el('srv-host').value = state.server.host || '';
-  el('srv-port').value = state.server.port || '';
-}
-
-function renderServer() {
-  el('server-blurb').textContent =
-    'Config: ' + state.configFile + ' (' + state.configFormat + '). Running on ' + state.server.runningHost + ':' + state.server.runningPort + '.';
-  el('srv-host').value = state.server.host || '';
-  el('srv-port').value = state.server.port || '';
 }
 
 let activeTab = 'status';
@@ -1115,16 +793,6 @@ function renderStatus() {
   endpointWrap.appendChild(endpointText);
   endpointWrap.appendChild(copy);
   card(host, t('card_endpoint'), endpointWrap);
-  card(host, t('card_config'), state.configFile + ' (' + state.configFormat + ')');
-  const gwCount = (state.gateway && state.gateway.keys.length) || 0;
-  const gwValue = document.createElement('span');
-  if (state.gateway.requireAuth) {
-    gwValue.textContent = t('gw_on', { n: gwCount });
-  } else {
-    gwValue.textContent = (gwCount ? t('gw_off_keys') : t('gw_off')) + ' ';
-    gwValue.appendChild(gotoLink(t('goto_access'), 'access'));
-  }
-  card(host, t('card_gateway'), gwValue, state.gateway.requireAuth ? 'ok-text' : 'warn');
   const noKey = state.providers.filter((entry) => !entry.configured).map((entry) => entry.name);
   const noKeyValue = document.createElement('span');
   if (!noKey.length) {
@@ -1134,50 +802,12 @@ function renderStatus() {
     noKeyValue.appendChild(gotoLink(t('goto_providers'), 'providers'));
   }
   card(host, t('card_nokey'), noKeyValue, noKey.length ? 'warn' : 'ok-text');
-  if (state.webui.defaultPassword) {
-    const adminValue = document.createElement('span');
-    adminValue.textContent = t('adminpw_warn') + ' ';
-    adminValue.appendChild(gotoLink(t('goto_settings'), 'settings'));
-    card(host, t('card_adminpw'), adminValue, 'bad-text');
-  }
   el('status-blurb').textContent = t('status_blurb');
-}
-
-function renderUsage() {
-  const host = el('usage');
-  host.textContent = '';
-  el('usage-blurb').textContent = t('usage_blurb', { today: state.usage.today, tz: state.usage.timezone });
-  const models = (state.usage.models || []).slice(0, 12);
-  if (!models.length) {
-    const p = document.createElement('p');
-    p.className = 'note';
-    p.style.margin = '0';
-    p.textContent = t('usage_empty');
-    host.appendChild(p);
-    return;
-  }
-  host.appendChild(table(
-    [{ label: t('th_model') }, { label: t('th_today'), num: true }, { label: t('th_ok'), num: true }, { label: t('th_fail'), num: true }, { label: t('th_limit'), num: true }],
-    models.map((entry) => [
-      td(entry.key, 'mono'),
-      td(entry.today ? entry.today.consumed : '-', 'num'),
-      td(entry.ok || '-', 'num'),
-      td(entry.fail || '-', 'num'),
-      td(entry.dailyLimit || '-', 'num'),
-    ]),
-  ));
 }
 
 function routeStatusFor(routeName, modelString) {
   const entries = (state.allRoutes && state.allRoutes[routeName]) || [];
-  const match = (entry) => {
-    const id = entry.id || '';
-    if (modelString.includes(':') && entry.provider) {
-      return entry.provider + ':' + id === modelString;
-    }
-    return id === modelString || ('openrouter:' + id) === modelString;
-  };
-  return entries.find(match) || null;
+  return entries.find((entry) => entry.provider + ':' + (entry.id || '') === modelString) || null;
 }
 
 function renderRouteEditor() {
@@ -1247,85 +877,11 @@ function renderRouteEditor() {
   el('route-note').textContent = draftEntries.length ? t('route_unsaved_note') : t('route_empty');
 }
 
-function renderLimits() {
-  const host = el('limits-table');
-  host.textContent = '';
-  const limits = (state.editable && state.editable.limits) || [];
-  if (!limits.length) {
-    const p = document.createElement('p');
-    p.className = 'note';
-    p.style.margin = '0';
-    p.textContent = t('limits_empty');
-    host.appendChild(p);
-    return;
-  }
-  host.appendChild(table(
-    [{ label: t('th_model') }, { label: t('th_limit_day'), num: true }, { label: t('th_source') }, { label: '' }],
-    limits.map((entry) => {
-      const del = document.createElement('button');
-      del.className = 'quiet';
-      del.textContent = t('del');
-      del.onclick = async () => {
-        try {
-          await api('api/limits', { method: 'POST', body: JSON.stringify({ action: 'delete', key: entry.key }) });
-          toast(t('limit_deleted', { key: entry.key }), 'good');
-          await load();
-        } catch (error) {
-          toast(String(error.message || error), 'err');
-        }
-      };
-      return [td(entry.key, 'mono'), td(String(entry.limit), 'num'), td(entry.source), td(del)];
-    }),
-  ));
-}
-
-function renderDiscovery() {
-  const disc = state.editable.discovery;
-  el('disc-enabled').checked = Boolean(disc.enabled);
-  el('disc-eval').checked = Boolean(disc.evaluationEnabled);
-  const providerSelect = el('disc-provider');
-  providerSelect.textContent = '';
-  for (const provider of state.providers) {
-    const option = document.createElement('option');
-    option.value = provider.name;
-    option.textContent = provider.name;
-    providerSelect.appendChild(option);
-  }
-  providerSelect.value = disc.provider;
-  el('disc-interval').value = disc.intervalHours;
-  el('disc-note').innerHTML = t('disc_note', { route: disc.route });
-  const host = el('pinned-list');
-  host.textContent = '';
-  for (const model of disc.pinnedModels || []) {
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    const id = document.createElement('span');
-    id.className = 'mono';
-    id.textContent = model;
-    const rm = document.createElement('button');
-    rm.className = 'quiet';
-    rm.textContent = '×';
-    rm.onclick = async () => {
-      try {
-        await api('api/discovery', { method: 'POST', body: JSON.stringify({ unpin: model }) });
-        toast(t('unpinned_msg', { m: model }), 'good');
-        await load();
-      } catch (error) {
-        toast(String(error.message || error), 'err');
-      }
-    };
-    chip.appendChild(id);
-    chip.appendChild(rm);
-    host.appendChild(chip);
-  }
-}
-
 function renderMigration() {
   const banner = el('migrate-banner');
   const summary = state.migration;
   const movedProviders = summary && summary.providers ? Object.entries(summary.providers) : [];
-  const movedGateway = summary ? Number(summary.gateway || 0) : 0;
-  if (!summary || summary.empty || (!movedProviders.length && !movedGateway)) {
+  if (!summary || summary.empty || !movedProviders.length) {
     banner.hidden = true;
     banner.textContent = '';
     return;
@@ -1335,7 +891,7 @@ function renderMigration() {
   const text = document.createElement('span');
   text.textContent = t('mig_text', {
     p: movedProviders.map(([name, count]) => name + '×' + count).join(', '),
-    g: movedGateway ? t('mig_gw') : '',
+    g: '',
   });
   const dismiss = document.createElement('button');
   dismiss.textContent = t('mig_dismiss');
@@ -1351,64 +907,6 @@ function renderMigration() {
   banner.appendChild(dismiss);
 }
 
-const SESS_PRESETS = [
-  [1, 'sess_p1h'],
-  [12, 'sess_p12h'],
-  [24, 'sess_p24h'],
-  [168, 'sess_p7d'],
-  [720, 'sess_p30d'],
-  [0, 'sess_pnever'],
-];
-
-// Custom choice resolves through a prompt and is kept here until saved,
-// because there is no text input anymore.
-let sessCustomHours = null;
-
-function renderSession() {
-  const select = el('sess-preset');
-  select.textContent = '';
-  for (const [hours, labelKey] of SESS_PRESETS) {
-    const option = document.createElement('option');
-    option.value = String(hours);
-    option.textContent = t(labelKey);
-    select.appendChild(option);
-  }
-  const custom = document.createElement('option');
-  custom.value = 'custom';
-  custom.textContent = t('sess_pcustom');
-  select.appendChild(custom);
-  const current = String(state.webui.sessionTtlHours);
-  if (SESS_PRESETS.some(([hours]) => String(hours) === current)) {
-    sessCustomHours = null;
-    select.value = current;
-  } else {
-    sessCustomHours = Number(state.webui.sessionTtlHours);
-    select.value = 'custom';
-  }
-  el('sess-note').textContent = state.webui.sessionExpiresAt
-    ? t('sess_expires', { at: state.webui.sessionExpiresAt })
-    : t('sess_never');
-}
-
-function renderTuning() {
-  const general = state.editable.general;
-  el('set-timeout').value = general.attemptTimeoutMs;
-  el('set-refresh').value = general.catalogRefreshMs;
-  el('set-redact').checked = Boolean(general.redactSecrets);
-  el('set-socks').value = (general.socksFirstHosts || []).join(', ');
-  const select = el('set-default');
-  select.textContent = '';
-  for (const provider of state.providers) {
-    const option = document.createElement('option');
-    option.value = provider.name;
-    option.textContent = provider.name;
-    select.appendChild(option);
-  }
-  select.value = general.defaultProvider;
-  el('set-retention').value = general.retentionDays;
-  el('set-timezone').value = general.timezone || '';
-}
-
 function bindOnce() {
   if (bindOnce.done) return;
   bindOnce.done = true;
@@ -1416,147 +914,6 @@ function bindOnce() {
     button.onclick = () => switchTab(button.dataset.tab);
   }
   el('lang').onchange = () => setLang(el('lang').value);
-  const doLogout = async () => {
-    try { await api('api/logout', { method: 'POST' }); } catch (error) { /* ignore */ }
-    showLogin();
-  };
-  el('logout').onclick = doLogout;
-  el('logout-top').onclick = doLogout;
-  el('gw-create').onclick = async () => {
-    const label = el('gw-name').value.trim();
-    if (!label) { toast(t('gw_name_need'), 'err'); return; }
-    try {
-      const result = await api('api/gateway-keys', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'create', name: label }),
-      });
-      el('gw-name').value = '';
-      prompt(t('gw_copy_once'), result.key);
-      toast(t('gw_created', { n: label }), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('gw-require').onchange = async () => {
-    const want = el('gw-require').checked;
-    if (want && !((state.gateway && state.gateway.keys) || []).length) {
-      el('gw-require').checked = false;
-      toast(t('gw_need_key'), 'err');
-      return;
-    }
-    try {
-      await api('api/gateway-keys', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'setRequireAuth', requireAuth: want }),
-      });
-      toast(want ? t('gw_on_msg') : t('gw_off_msg'), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-      await load();
-    }
-  };
-  el('admin-save').onclick = async () => {
-    const value = el('admin-pass').value;
-    if (!value) { toast(t('admin_need'), 'err'); return; }
-    try {
-      await api('api/webui-password', { method: 'POST', body: JSON.stringify({ password: value }) });
-      el('admin-pass').value = '';
-      toast(t('admin_changed'), 'good');
-      showLogin();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('sess-preset').onchange = () => {
-    const value = el('sess-preset').value;
-    if (value !== 'custom') {
-      sessCustomHours = null;
-      return;
-    }
-    const raw = prompt(t('sess_custom_prompt'), String(state.webui.sessionTtlHours));
-    if (raw === null) {
-      renderSession();
-      return;
-    }
-    const hours = Number(raw);
-    if (!Number.isFinite(hours) || hours < 0 || hours > 8760) {
-      toast(t('sess_invalid'), 'err');
-      renderSession();
-      return;
-    }
-    sessCustomHours = hours;
-  };
-  el('sess-save').onclick = async () => {
-    const hours = el('sess-preset').value === 'custom'
-      ? sessCustomHours
-      : Number(el('sess-preset').value);
-    if (hours === null || !Number.isFinite(hours)) {
-      toast(t('sess_invalid'), 'err');
-      return;
-    }
-    try {
-      const result = await api('api/settings', {
-        method: 'POST',
-        body: JSON.stringify({ sessionTtlHours: hours }),
-      });
-      toast(t('saved') + ((result.notes || []).length ? ' ' + result.notes.join(' ') : ''), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('srv-save').onclick = async () => {
-    try {
-      const result = await api('api/server', {
-        method: 'POST',
-        body: JSON.stringify({ host: el('srv-host').value.trim(), port: Number(el('srv-port').value) }),
-      });
-      toast(t('srv_saved', { notes: (result.notes || []).join(' ') }), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('srv-restart').onclick = async () => {
-    if (!confirm(t('restart_confirm'))) return;
-    try {
-      await api('api/restart', { method: 'POST' });
-      toast(t('restarting_msg'), 'good');
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('login-go').onclick = doLogin;
-  el('login-pass').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') doLogin();
-  });
-  el('np-create').onclick = async () => {
-    const name = el('np-name').value.trim().toLowerCase();
-    const baseUrl = el('np-baseurl').value.trim();
-    if (!name || !baseUrl) { toast(t('np_need'), 'err'); return; }
-    try {
-      await api('api/providers', {
-        method: 'POST',
-        body: JSON.stringify({
-          action: 'create',
-          name,
-          baseUrl,
-          catalog: el('np-catalog').checked,
-          pricing: el('np-pricing').checked,
-          freeModels: el('np-freemodels').value.split(',').map((s) => s.trim()).filter(Boolean),
-        }),
-      });
-      el('np-name').value = '';
-      el('np-baseurl').value = '';
-      el('np-freemodels').value = '';
-      toast(t('np_added', { n: name }), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
   el('route-select').onchange = () => {
     draftRoute = el('route-select').value;
     draftEntries = [...(state.editable.routes[draftRoute] || [])];
@@ -1608,103 +965,15 @@ function bindOnce() {
       toast(String(error.message || error), 'err');
     }
   };
-  el('limit-add').onclick = async () => {
-    const key = el('limit-key').value.trim();
-    const limit = Number(el('limit-val').value);
-    if (!key || !Number.isFinite(limit)) { toast(t('limit_need'), 'err'); return; }
-    try {
-      await api('api/limits', { method: 'POST', body: JSON.stringify({ action: 'set', key, limit }) });
-      el('limit-key').value = '';
-      el('limit-val').value = '';
-      toast(t('limit_set', { key }), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('disc-save').onclick = async () => {
-    try {
-      const result = await api('api/discovery', {
-        method: 'POST',
-        body: JSON.stringify({
-          enabled: el('disc-enabled').checked,
-          evaluationEnabled: el('disc-eval').checked,
-          provider: el('disc-provider').value,
-          intervalHours: Number(el('disc-interval').value),
-        }),
-      });
-      toast(t('saved') + ((result.notes || []).length ? ' ' + result.notes.join(' ') : ''), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('pin-add').onclick = async () => {
-    const value = el('pin-input').value.trim();
-    if (!value) return;
-    try {
-      await api('api/discovery', { method: 'POST', body: JSON.stringify({ pin: value }) });
-      el('pin-input').value = '';
-      toast(t('pinned_msg', { m: value }), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-  el('set-save').onclick = async () => {
-    try {
-      const result = await api('api/settings', {
-        method: 'POST',
-        body: JSON.stringify({
-          attemptTimeoutMs: Number(el('set-timeout').value),
-          catalogRefreshMs: Number(el('set-refresh').value),
-          redactSecrets: el('set-redact').checked,
-          defaultProvider: el('set-default').value,
-          socksFirstHosts: el('set-socks').value.split(',').map((s) => s.trim()).filter(Boolean),
-          retentionDays: Number(el('set-retention').value),
-          timezone: el('set-timezone').value.trim(),
-        }),
-      });
-      toast(t('saved') + ((result.notes || []).length ? ' ' + result.notes.join(' ') : ''), 'good');
-      await load();
-    } catch (error) {
-      toast(String(error.message || error), 'err');
-    }
-  };
-}
-
-async function doLogin() {
-  const value = el('login-pass').value;
-  if (!value) { toast(t('err_admin_pass'), 'err'); return; }
-  try {
-    await api('api/login', { method: 'POST', body: JSON.stringify({ password: value }) });
-    el('login-pass').value = '';
-    await load();
-  } catch (error) {
-    toast(String(error.message || error), 'err');
-  }
-}
-
-function showLogin() {
-  el('login').style.display = '';
-  el('app').style.display = 'none';
-  el('logout-top').style.display = 'none';
-  state = null;
-  applyI18n();
 }
 
 async function load() {
   try {
     state = await api('api/state');
   } catch (error) {
-    showLogin();
-    if (!String(error.message || '').includes('login')) toast(String(error.message || error), 'err');
+    toast(String(error.message || error), 'err');
     return;
   }
-  el('login').style.display = 'none';
-  el('app').style.display = '';
-  el('logout-top').style.display = '';
-  el('endpoint').textContent = state.endpoint;
   bindOnce();
   applyI18n();
   renderAll();
@@ -1713,7 +982,7 @@ async function load() {
 function renderRoutes() {
   const host = el('routes');
   host.textContent = '';
-  el('routes-blurb').innerHTML = t('routes_blurb', { today: state.usage.today, tz: state.usage.timezone });
+  el('routes-blurb').innerHTML = t('routes_blurb');
   const rows = state.routes.map((entry) => {
     let status = t('st_ready');
     let kind = 'ok';
@@ -1770,8 +1039,6 @@ function renderRoutes() {
   }
 }
 
-// Bind buttons before the first load: an unauthenticated visit fails
-// /api/state and returns early, which must not leave the login button dead.
 bindOnce();
 load().catch((error) => toast(String(error.message || error), 'err'));
 </script>

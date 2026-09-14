@@ -253,7 +253,7 @@ export function createProviderRegistry(config, { host, port }) {
   }
 
   function hasUsableKey(provider) {
-    return Boolean(provider && provider.apiKeys && provider.apiKeys.length);
+    return Boolean(provider && keySlots(provider.name).length);
   }
 
   function isFree(candidate) {
@@ -294,9 +294,7 @@ export function createProviderRegistry(config, { host, port }) {
     const usable = provider.apiKeys
       .map((entry, index) => ({ ...entry, index }))
       .filter((entry) => entry.key && !provider.invalidKeys.has(entry.key));
-    if (!usable.length) {
-      return provider.apiKeys.map((entry, index) => ({ ...entry, index }));
-    }
+    if (!usable.length) return [];
     const start = provider.keyCursor % usable.length;
     return [...usable.slice(start), ...usable.slice(0, start)];
   }
@@ -382,12 +380,8 @@ export function createProviderRegistry(config, { host, port }) {
     return provider.modelsUrl || joinUrl(provider.baseUrl, provider.modelsPath);
   }
 
-  function firstKey(provider) {
-    return provider?.apiKeys?.[0]?.key || '';
-  }
-
   function catalogHeaders(provider, keyOverride) {
-    const key = keyOverride ?? firstKey(provider);
+    const key = keyOverride ?? keySlots(provider.name)[0]?.key;
     if (!key) return undefined;
     // Google's native endpoint rejects a Bearer token with 401 and wants its
     // own header. Keeping the key out of the query string keeps it out of logs.
@@ -413,6 +407,7 @@ export function createProviderRegistry(config, { host, port }) {
 
   async function refreshProviderCatalog(provider, force, catalogRefreshMs) {
     if (!provider.usesCatalog) return;
+    if (!hasUsableKey(provider)) return;
     if (
       !force &&
       Date.now() - provider.catalogAttemptedAt < catalogRefreshMs &&
@@ -421,17 +416,16 @@ export function createProviderRegistry(config, { host, port }) {
       return;
     }
     provider.catalogAttemptedAt = Date.now();
-    const keyCandidates = provider.apiKeys?.map((entry) => entry.key).filter(Boolean) || [];
-    if (!keyCandidates.length) keyCandidates.push('');
+    const keyCandidates = keySlots(provider.name);
     let lastError = null;
-    for (const keyCandidate of keyCandidates) {
+    for (const slot of keyCandidates) {
       try {
         const listed = [];
         let pageToken = '';
         // A truncated listing is indistinguishable from models withdrawn
         // upstream, so follow pagination rather than trusting the first page.
         for (let page = 0; page < 10; page += 1) {
-          const result = await fetchCatalogPage(provider, pageToken, keyCandidate);
+          const result = await fetchCatalogPage(provider, pageToken, slot.key);
           if (result.shape === 'unknown') throw new Error('unrecognised catalog response shape');
           listed.push(...result.models);
           pageToken = result.nextPageToken;
@@ -453,8 +447,20 @@ export function createProviderRegistry(config, { host, port }) {
         return { name: provider.name, size: provider.catalog.size, freeCount, chatCount };
       } catch (error) {
         lastError = error;
-        // A wrong key must not poison other keys: try the next one.
-        if (error?.status === 401 && keyCandidate !== keyCandidates[keyCandidates.length - 1]) continue;
+        if (error?.status === 401) {
+          markKeyInvalid(provider.name, slot.key);
+          continue;
+        }
+        const status = Number(error?.status || 0);
+        if (
+          status === 408 ||
+          status === 429 ||
+          status >= 500 ||
+          error?.name === 'AbortError' ||
+          error?.name === 'TimeoutError'
+        ) {
+          continue;
+        }
         break;
       }
     }
@@ -509,7 +515,7 @@ export function createProviderRegistry(config, { host, port }) {
     const models = [];
     const seen = new Set(excludeIds);
     for (const provider of providers.values()) {
-      if (!provider.catalogHasPricing || !provider.catalog) continue;
+      if (!hasUsableKey(provider) || !provider.catalogHasPricing || !provider.catalog) continue;
       for (const model of provider.catalog.values()) {
         if (!isZeroCost(model) || !isChatModel(model) || seen.has(model.id)) continue;
         seen.add(model.id);
@@ -543,12 +549,6 @@ export function createProviderRegistry(config, { host, port }) {
         {
           configured: hasUsableKey(provider),
           keyCount: provider.apiKeys?.length || 0,
-          keys: (provider.apiKeys || []).map((entry) => ({
-            name: entry.name,
-            source: entry.source,
-            masked: entry.key ? `${entry.key.slice(0, 5)}${'*'.repeat(8)}${entry.key.slice(-4)} (${entry.key.length})` : '',
-            invalid: provider.invalidKeys.has(entry.key),
-          })),
           kind: providerKind(provider),
           baseUrl: provider.baseUrl,
           freeModels: provider.catalogHasPricing ? undefined : [...provider.freeModels],
@@ -571,24 +571,19 @@ export function createProviderRegistry(config, { host, port }) {
   }
 
   // Applied to the live provider and to process.env, so a key set at runtime
-  // works on the next request without a restart. Legacy single-key path:
-  // replaces the `env` entry, keeps file keys intact.
+  // works on the next request without a restart. The single-key path updates
+  // only <KEYENV>; named file keys and plural env keys remain available.
   function setApiKey(name, key) {
     const provider = get(name);
     if (!provider) return false;
     const value = String(key || '');
-    const fileKeys = (provider.apiKeys || []).filter((entry) => entry.source === 'file');
-    const next = [...fileKeys];
     if (value) {
       process.env[provider.keyEnv] = value;
-      next.push({ name: 'env', key: value, source: 'env', keyEnv: provider.keyEnv });
     } else {
       delete process.env[provider.keyEnv];
     }
-    provider.apiKeys = next;
-    provider.apiKey = next[0]?.key || '';
-    provider.invalidKeys.clear();
-    if (provider.usesCatalog && !next.length) {
+    refreshKeysFromEnv(name);
+    if (provider.usesCatalog && !provider.apiKeys.length) {
       provider.catalog = new Map();
       provider.catalogSlugs = new Map();
       provider.catalogFetchedAt = 0;
@@ -605,16 +600,18 @@ export function createProviderRegistry(config, { host, port }) {
     if (!provider) return false;
     const cleaned = (entries || [])
       .map((entry, index) => ({
-        name: String(entry?.name || `key-${index + 1}`),
-        key: String(entry?.key || ''),
+        name: String(entry?.name || `key-${index + 1}`).trim(),
+        key: String(entry?.key || '').trim(),
         source: 'file',
       }))
       .filter((entry) => entry.key);
-    const seen = new Set();
+    const seenKeys = new Set();
+    const seenNames = new Set();
     const deduped = [];
     for (const entry of cleaned) {
-      if (seen.has(entry.key)) continue;
-      seen.add(entry.key);
+      if (seenKeys.has(entry.key) || seenNames.has(entry.name)) continue;
+      seenKeys.add(entry.key);
+      seenNames.add(entry.name);
       deduped.push(entry);
     }
     provider.configRef.keys = deduped.map(({ name: keyName, key }) => ({ name: keyName, key }));

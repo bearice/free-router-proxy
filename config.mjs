@@ -569,8 +569,7 @@ export function defaultConfigObject() {
         { provider: 'bai', model: 'mimo-v2.5' },
       ],
     },
-    webui: { enabled: true, envFile: '.env', password: 'admin123' },
-    gateway: { requireAuth: false, keys: [] },
+    webui: { enabled: true, envFile: '.env' },
   };
 }
 
@@ -608,23 +607,28 @@ export function saveConfigFile(configPath, config) {
 export function providerKeysFromConfig(providerName, providerConfig) {
   const cfg = providerConfig && typeof providerConfig === 'object' ? providerConfig : {};
   const keyEnv = cfg.keyEnv || `${String(providerName).replace(/-/g, '_').toUpperCase()}_API_KEY`;
-  const fromFile = Array.isArray(cfg.keys)
+  const rawFileKeys = Array.isArray(cfg.keys)
     ? cfg.keys
-        .map((entry, index) => {
-          if (typeof entry === 'string') return { name: `key-${index + 1}`, key: entry, source: 'file' };
-          if (entry && typeof entry === 'object') {
-            return {
-              name: String(entry.name || `key-${index + 1}`),
-              key: String(entry.key || ''),
-              source: 'file',
-            };
-          }
-          return null;
-        })
-        .filter(Boolean)
-    : [];
+    : typeof cfg.keys === 'string' || (cfg.keys && typeof cfg.keys === 'object')
+      ? [cfg.keys]
+      : [];
+  const fromFile = rawFileKeys
+    .map((entry, index) => {
+      if (typeof entry === 'string') {
+        return { name: `key-${index + 1}`, key: entry.trim(), source: 'file' };
+      }
+      if (entry && typeof entry === 'object') {
+        return {
+          name: String(entry.name || `key-${index + 1}`).trim(),
+          key: String(entry.key || '').trim(),
+          source: 'file',
+        };
+      }
+      return null;
+    })
+    .filter((entry) => entry?.key);
   const envKeys = [];
-  const single = process.env[keyEnv] || '';
+  const single = String(process.env[keyEnv] || '').trim();
   if (single) envKeys.push({ name: 'env', key: single, source: 'env', keyEnv });
   for (const plural of [`${keyEnv}S`, `${keyEnv}_KEYS`]) {
     const raw = process.env[plural] || '';

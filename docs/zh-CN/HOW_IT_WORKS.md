@@ -68,11 +68,9 @@ cp .env.example .env
 docker compose up -d
 ```
 
-网关默认在 `http://127.0.0.1:8787/v1` 可达，和非 Docker 一样；设置
-`FREE_ROUTER_HOST=0.0.0.0`（Docker 默认已是）并发布端口即允许局域网
-访问——但先建网关 API Key、改管理密码（下面局域网一节）。Key 运行时从
-`.env` 注入，永远不会 bake 进镜像。每周发现的状态是临时的：住在容器
-里，重建就重置（网关按每周计划重新发现免费模型）。
+网关在 `http://127.0.0.1:8787/v1` 可达。容器进程绑 `0.0.0.0` 只是为了
+Docker 端口转发；Compose 在宿主机上只发布到 loopback。Key 运行时从
+`.env` 注入，不会 bake 进镜像。每周发现状态在容器重建时重置。
 
 ```bash
 docker compose ps
@@ -108,11 +106,9 @@ npm run models -- --json
 
 ## Web 界面
 
-打开 <http://127.0.0.1:8787/> 并登录（默认密码 `admin123`，去设置 →
-管理里改）。界面有状态、访问、渠道、路由、配额、设置几个标签页，跟随
-浏览器语言，每处修改都立即对运行中的进程生效——除了 host、端口和少数
-标了"需重启"的设置（Save 旁边有重启按钮，Docker 下 supervisor 会把
-服务拉起来）。
+打开 <http://127.0.0.1:8787/>。这个仅限本机的界面有状态、渠道、路由、
+配额、设置几个标签页，会跟随浏览器语言；大多数修改立即生效，端口和
+标注的设置需要重启。
 
 ```json
 "webui": {
@@ -123,20 +119,6 @@ npm run models -- --json
 
 设 `enabled: false` 可整个拿掉 `/` 和 `/api/*`。
 
-### 鉴权模型
-
-有两道独立的门：
-
-- **Web UI + 管理接口**（`/`、`/api/*`）：管理密码登录，发 `HttpOnly`
-  会话 cookie。会话 `webui.sessionTtlHours` 后过期（默认 24，`0` 表示
-  永不过期，此时是浏览器会话 cookie）。改密码会吊销所有会话。
-- **网关接口**（`/v1/*`）：存在至少一个 Key 时要求 bearer Key（访问
-  tab）。一个网关 Key 都没有时，`/v1` 保持开放，方便本地用。
-
-鉴权之外，浏览器侧的滥用照样过滤：跨站请求按 `Sec-Fetch-Site` 拒绝；
-`Host` 指向公网域名的（DNS rebind）拒绝，loopback、局域网、`.local`
-放行。纯 `curl` 不带这两个头，照常用。
-
 ### 写 Key 接口为什么要小心
 
 `start.sh` 用 `set -a` source env 文件，能往里面写任意变量就等于下次
@@ -146,28 +128,8 @@ npm run models -- --json
   后的配置里解析 `keyEnv`，写不出任何已配置渠道 Key 变量之外的东西。
 - 含换行或 NUL 的值直接拒绝，一行字串不出第二个赋值。
 - env 文件原子写入，权限 `0600`，已存在的文件会被 chmod 压下来。
-- Key 只返回掩码版，绝不返回全文（新建的网关 Key 只在创建那一刻显示
-  一次）。
+- Key 只返回掩码版，绝不返回全文。
 - 改完 Key 重建脱敏器，所以 UI 里加的 Key 照样会从上游请求里剥掉。
-
-## 局域网访问
-
-1. 放宽绑定：`FREE_ROUTER_HOST=0.0.0.0` 并发布端口
-   （`docker-compose.yml` 里 `8787:8787`），宿主机防火墙也要放行。
-2. 去 Web UI 建一个网关 API Key（访问 tab），改掉管理密码（设置 tab）。
-   状态页在做完之前会直接链过去。
-3. `/v1/*` 带 `Authorization: Bearer <key>` 调；局域网任意浏览器打开 UI
-   登录即可。
-
-管理密码存的是加盐 scrypt 哈希，不是明文。
-`FREE_ROUTER_WEBUI_PASSWORD` 可覆盖，用于锁死时的应急恢复。
-
-## 网关 API Key
-
-给调 `/v1/*` 的客户端用的命名凭证（`sk-fr-…`，只在创建时显示一次）。
-建第一个 Key 即启用鉴权；删光即关闭（访问标题行的开关零 Key 时拒绝
-打开）。`/v1/models` 和 `/v1/chat/completions` 都校验；`/health` 保持
-开放，给容器探活用。
 
 ## Provider Key（多账号）
 
@@ -177,10 +139,8 @@ npm run models -- --json
 单个变量、复数变量，按值去重。请求在它们之间轮换；`401` 只退役中招
 那把，限流和超时只冷却那把，换下一把不行才换下一个模型。
 
-首次启动时，`.env` 里的 Key 会一次性导入 `config.local.json`（命名为
-`migrated-N`）并从 `.env` 里删掉，UI 里有条可关闭的横幅提示迁了几个。
-`.env` 里的个人 `FREE_ROUTER_API_KEY` 会额外变成一个命名网关 Key（它
-留在 `.env` 里不动，因为 `models.sh` 还要用它）。
+首次启动时，`.env` 里的 provider Key 会一次性导入 `config.local.json`
+（命名为 `migrated-N`）并从 `.env` 里删掉，UI 会提示迁移数量。
 
 ## 配置分层
 
@@ -202,16 +162,14 @@ gitignored 的 `config.local.json`，服务端启动时深度合并（对象按 
 
 ## 对接任意 OpenAI 兼容客户端
 
-把客户端指向网关；开了网关鉴权就把任一网关 Key 当 bearer token 发
-（没开鉴权时 `local` 这类占位符就行）。上游 provider 的 Key 不出网关。
-从不开鉴权就别放开 localhost 绑定。
+把客户端指向本机网关；上游 provider 的 Key 不出网关。客户端需要填写
+API Key 时可使用 `local` 这样的占位值。
 
 **curl**
 
 ```bash
 curl -s http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-fr-...' \
   -d '{
     "model": "free-best",
     "messages": [{"role": "user", "content": "Reply with exactly: router-ok"}]
@@ -223,7 +181,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="sk-fr-...")
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="local")
 print(client.chat.completions.create(
     model="free-best",
     messages=[{"role": "user", "content": "Hello"}],
@@ -240,7 +198,7 @@ model:
 custom_providers:
   - name: free-router
     base_url: http://127.0.0.1:8787/v1
-    api_key: sk-fr-...
+    api_key: local
     api_mode: chat_completions
     discover_models: true
     models:
@@ -255,23 +213,19 @@ custom_providers:
 ## 接口
 
 ```text
-GET  /                       Web 界面（要登录）
-POST /api/login              { "password": "..." } -> 会话 cookie
-POST /api/logout             吊销当前会话
-GET  /api/state              完整 UI 状态（要会话）
+GET  /                       仅限本机的 Web 界面
+GET  /api/state              完整 UI 状态
 POST /api/keys               provider Key：{ "provider", "name"?, "key" }
-POST /api/gateway-keys       网关 Key：{ "action": "create|delete|setRequireAuth", ... }
 POST /api/providers          { "action": "create|update|delete", ... }
 POST /api/routes             { "action": "save|delete", "route", "models" }
 POST /api/limits             每日限额：{ "action": "set|delete", "key", "limit" }
 POST /api/discovery          发现开关、渠道、间隔、置顶
-POST /api/settings           调优参数、会话 TTL、迁移提示
-POST /api/webui-password     { "password": "..." }（存哈希，吊销所有会话）
-POST /api/server             { "host", "port" }（重启生效）
-POST /api/restart            退出等 supervisor 重启（要会话）
+POST /api/settings           调优参数、迁移提示
+POST /api/server             { "port" }（重启生效）
+POST /api/restart            退出等 supervisor 重启
 GET  /health
-GET  /v1/models              开了鉴权就要网关 Key
-POST /v1/chat/completions    开了鉴权就要网关 Key
+GET  /v1/models
+POST /v1/chat/completions
 ```
 
 `GET /health` 报 `package.json` 的 `version`（当前 `1.0.0`），发版用
@@ -553,7 +507,7 @@ journalctl --user -u free-router-proxy -f
 9. 限流、超时、服务端错、空成功回复走 provider/model/Key 三级冷却；
    `401` 只退役那把 Key。
 10. 发上游前，把本地环境里 `*_API_KEY` / `*_TOKEN` / `*_SECRET` /
-    `*_PASSWORD` 的值（含 provider Key、网关 Key、管理密码）以及这些名字
+    `*_PASSWORD` 的值（含 provider Key）以及这些名字
     的 `NAME=...` 赋值行都脱敏。这拦不住 Hermes 在本地读 `.env`，只保证
     这些值不进 OpenRouter、TokenRouter、B.AI 的请求体。
 11. 推理专用的流 chunk 先攒着，模型吐出正文或工具调用才往客户端发，

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
-import crypto from 'node:crypto';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,7 +18,6 @@ import {
   runOverlayMigrations,
   saveOverlayFile,
 } from './config.mjs';
-import { hashPassword, isPasswordHash, verifyPassword } from './auth.mjs';
 import {
   createProviderRegistry,
   isChatModel,
@@ -27,7 +26,12 @@ import {
   supportsRequest,
 } from './providers.mjs';
 import { installUpstreamProxy } from './proxy.mjs';
-import { msUntilQuotaReset, parseQuotaFailure, permanentRejection } from './quota.mjs';
+import {
+  msUntilQuotaReset,
+  parseQuotaFailure,
+  permanentRejection,
+  zeroBalanceRejection,
+} from './quota.mjs';
 import { createSecretRedactor } from './redact.mjs';
 import {
   createStreamSignatureExtractor,
@@ -96,8 +100,6 @@ const config = buildLiveConfig(baseConfig, overlay);
 // Live-view-only normalization (memory, never persisted): the overlay file
 // stays sparse until a real mutation lands through the helpers below.
 if (!isPlainObject(config.webui)) config.webui = {};
-if (!isPlainObject(config.gateway)) config.gateway = {};
-if (!Array.isArray(config.gateway.keys)) config.gateway = { ...config.gateway, keys: [] };
 // Write helpers below always target the overlay object, so a base-owned
 // subtree is materialized there on first write (copy-on-write) and the base
 // file is never touched at runtime.
@@ -231,84 +233,11 @@ const USAGE_DAY_FORMATTER = (() => {
 const uiConfig = config.webui || config.ui || {};
 const UI_ENABLED = uiConfig.enabled !== false;
 const UI_ENV_PATH = path.resolve(path.dirname(CONFIG_PATH), uiConfig.envFile || '.env');
-// Web UI single admin password (default "admin123"). Stored as a salted
-// scrypt hash; legacy plaintext values are upgraded on boot and on login.
-// Env override wins so a locked-out operator can recover without editing
-// the config file.
-const storedWebuiPassword = () => String(uiConfig.password || config.ui?.password || 'admin123');
-
-// Whether the effective password is still the default. Memoized per stored
-// value so the scrypt check runs at most once per password change.
-let defaultPwCache = { key: null, result: false };
-function isDefaultPassword() {
-  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) {
-    return process.env.FREE_ROUTER_WEBUI_PASSWORD === 'admin123';
-  }
-  const stored = storedWebuiPassword();
-  if (stored === 'admin123') return true;
-  if (defaultPwCache.key === stored) return defaultPwCache.result;
-  const result = verifyPassword('admin123', stored);
-  defaultPwCache = { key: stored, result };
-  return result;
-}
-
-function setStoredWebuiPassword(value, { persist = true } = {}) {
-  // Readers prefer config.webui over the legacy config.ui mirror, so the
-  // overlay copy alone is authoritative; the tracked base file is untouched.
-  setOverlayValue(['webui', 'password'], value);
-  defaultPwCache.key = null;
-  if (!persist) return true;
-  try {
-    persistOverlayFile();
-  } catch (error) {
-    log(`could not persist web UI password: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-  return true;
-}
-
-function checkWebuiPassword(input) {
-  const password = String(input || '');
-  if (!password) return false;
-  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) {
-    return verifyPassword(password, process.env.FREE_ROUTER_WEBUI_PASSWORD);
-  }
-  return verifyPassword(password, storedWebuiPassword());
-}
-
-// One-time upgrade: replace a plaintext stored password with a salted hash.
-// Runs at boot and after successful legacy logins (operators hand-editing
-// the file between restarts converge on the next login either way).
-function upgradePasswordStorage(reason) {
-  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) return;
-  const stored = storedWebuiPassword();
-  if (isPasswordHash(stored)) return;
-  setStoredWebuiPassword(hashPassword(stored));
-  log(`upgraded web UI password storage to salted scrypt hash (${reason})`);
-}
-// Login session TTL in hours (default 24, 0 = never expires).
-const sessionTtlHours = () => {
-  const raw = Number(config.webui?.sessionTtlHours ?? 24);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 24;
-};
-const webuiSessions = new Map();
-function webuiSessionToken(req) {
-  const cookie = String(req.headers.cookie || '');
-  const match = cookie.match(/(?:^|;\s*)fr_session=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : '';
-}
-function pruneWebuiSessions() {
-  const now = Date.now();
-  for (const [token, expiresAt] of webuiSessions) {
-    if (expiresAt <= now) webuiSessions.delete(token);
-  }
-}
 let secretRedactor = config.redactSecrets === false ? null : createSecretRedactor(redactorEnv());
 
 // The redactor snapshots secrets at build time, so keys added through the
-// UI would otherwise never be stripped from upstream payloads. Overlay-
-// stored provider keys and gateway keys are not in process.env, so they are
-// merged in under synthetic names the redactor recognises as secrets.
+// UI would otherwise never be stripped from upstream payloads. Overlay-stored
+// provider keys are not in process.env, so merge them under synthetic names.
 function redactorEnv() {
   const merged = { ...process.env };
   let index = 0;
@@ -317,15 +246,6 @@ function redactorEnv() {
       if (entry.key) merged[`FREE_ROUTER_TOML_${index}_API_KEY`] = entry.key;
       index += 1;
     }
-  }
-  for (const entry of gatewayKeys()) {
-    if (entry.key) merged[`FREE_ROUTER_GATEWAY_${index}_TOKEN`] = entry.key;
-    index += 1;
-  }
-  const admin = storedWebuiPassword();
-  if (admin) merged.FREE_ROUTER_WEBUI_PASSWORD = admin;
-  if (process.env.FREE_ROUTER_WEBUI_PASSWORD) {
-    merged.FREE_ROUTER_WEBUI_PASSWORD = process.env.FREE_ROUTER_WEBUI_PASSWORD;
   }
   return merged;
 }
@@ -364,7 +284,7 @@ function migrateEnvFileOnce() {
   } catch {
     fileVars = new Map();
   }
-  const summary = { at: new Date().toISOString(), providers: {}, gateway: 0 };
+  const summary = { at: new Date().toISOString(), providers: {} };
   if (fileVars.size) {
     const clearVars = {};
     for (const provider of PROVIDERS.values()) {
@@ -406,18 +326,6 @@ function migrateEnvFileOnce() {
         summary.providers[provider.name] = fresh.length;
       }
     }
-    // A personal gateway client key kept in .env becomes a named gateway key
-    // (it stays in .env too, since local scripts like models.sh need it).
-    const clientFileKey = fileVars.get('FREE_ROUTER_API_KEY') || '';
-    const clientEffective = String(process.env.FREE_ROUTER_API_KEY || '');
-    const clientKey = clientEffective || clientFileKey;
-    if (clientKey && !gatewayKeys().length) {
-      setOverlayValue(['gateway', 'keys'], [
-        { name: 'migrated', key: clientKey, createdAt: new Date().toISOString() },
-      ]);
-      setOverlayValue(['gateway', 'requireAuth'], true);
-      summary.gateway = 1;
-    }
     if (Object.keys(clearVars).length && envFileExisted) {
       try {
         updateEnvFile(UI_ENV_PATH, clearVars);
@@ -441,44 +349,12 @@ function migrateEnvFileOnce() {
   }
   refreshSecretRedactor();
   const imported = Object.values(summary.providers).reduce((a, b) => a + b, 0);
-  if (imported || summary.gateway) {
-    log(`migrated ${imported} provider key(s) and ${summary.gateway} gateway key(s) from ${displayPath(UI_ENV_PATH)} into ${OVERLAY_FILENAME}; the overlay file is now where user data lives`);
+  if (imported) {
+    log(`migrated ${imported} provider key(s) from ${displayPath(UI_ENV_PATH)} into ${OVERLAY_FILENAME}; the overlay file is now where user data lives`);
   }
 }
 
 migrateEnvFileOnce();
-upgradePasswordStorage('boot');
-
-// Gateway (downstream) API keys: named client credentials for LAN access.
-// Auth is required once at least one key exists (unless explicitly disabled).
-function gatewayKeys() {
-  const keys = config.gateway?.keys;
-  return Array.isArray(keys) ? keys.filter((entry) => entry && entry.key) : [];
-}
-
-function gatewayAuthRequired() {
-  if (config.gateway?.requireAuth === false && !gatewayKeys().length) return false;
-  if (config.gateway?.requireAuth === true) return true;
-  return gatewayKeys().length > 0;
-}
-
-function bearerKey(req) {
-  const header = String(req.headers.authorization || '');
-  const match = header.match(/^\s*Bearer\s+(.+?)\s*$/i);
-  return match ? match[1] : '';
-}
-
-function gatewayClientName(req) {
-  const key = bearerKey(req);
-  if (!key) return '';
-  return gatewayKeys().find((entry) => entry.key === key)?.name || '';
-}
-
-function gatewayGuardFailure(req) {
-  if (!gatewayAuthRequired()) return '';
-  if (gatewayClientName(req)) return '';
-  return bearerKey(req) ? 'invalid API key' : 'missing API key (Authorization: Bearer <key>)';
-}
 
 const cooldowns = new Map();
 const thoughtSignatures = createThoughtSignatureCache();
@@ -545,7 +421,7 @@ function verdictFor(key) {
 function candidateIsFree(candidate) {
   const verdict = verdictFor(candidateKey(candidate));
   if (verdict?.free === false) return false;
-  if (verdict?.free === true) return Boolean(PROVIDERS.get(candidate.provider)?.apiKey);
+  if (verdict?.free === true) return registry.hasUsableKey(PROVIDERS.get(candidate.provider));
   return registry.isFree(candidate);
 }
 
@@ -1133,7 +1009,10 @@ async function evaluateModel(target) {
   if (supported.has('reasoning') || supported.has('reasoning_effort')) {
     evaluationBody.reasoning = { effort: 'low' };
   }
-  const result = await attemptJson(candidate, evaluationBody);
+  const slots = registry.keySlots(candidate.provider);
+  const slot = slots[0];
+  if (slot) registry.rotateKeyCursor(candidate.provider);
+  const result = await attemptJson(candidate, evaluationBody, undefined, slot);
   const latencyMs = Date.now() - startedAt;
   recordUsage(candidate, result.ok ? 'ok' : result.kind || 'other');
   if (!result.ok) {
@@ -1197,7 +1076,7 @@ async function probeFreeTierCandidates() {
   let budget = EVALUATION_MAX_PER_RUN;
 
   for (const provider of PROVIDERS.values()) {
-    if (!provider.probeFreeTier || !provider.apiKey || !provider.catalog?.size) continue;
+    if (!provider.probeFreeTier || !registry.hasUsableKey(provider) || !provider.catalog?.size) continue;
 
     const known = new Set(
       [
@@ -1428,7 +1307,12 @@ function requestNeeds(body) {
 function cooldownKey(candidate, slot) {
   const base = candidateKey(candidate);
   if (slot === undefined || slot === null) return base;
-  const suffix = typeof slot === 'object' ? (slot.index ?? slot.name ?? '') : slot;
+  const suffix =
+    typeof slot === 'object' && slot.key
+      ? createHash('sha256').update(String(slot.key)).digest('hex').slice(0, 16)
+      : typeof slot === 'object'
+        ? (slot.name ?? slot.index ?? '')
+        : slot;
   return `${base}#${suffix}`;
 }
 
@@ -1461,10 +1345,26 @@ function setCooldown(candidate, kind, reason, overrideMs = 0, slot = null) {
   });
 }
 
+function aggregateCooldown(candidate, now = Date.now()) {
+  const legacy = cooldowns.get(candidateKey(candidate));
+  if (legacy?.until > now) return legacy;
+  const slots = registry.keySlots(candidate.provider);
+  if (!slots.length) return null;
+  const active = slots
+    .map((slot) => cooldowns.get(cooldownKey(candidate, slot)))
+    .filter((entry) => entry?.until > now);
+  if (active.length !== slots.length) return null;
+  return active.reduce((soonest, entry) => (entry.until < soonest.until ? entry : soonest));
+}
+
 // A provider that explains its own refusal is worth listening to. Turns one
 // failed attempt into three separate decisions: how long to wait, whether the
 // model is free at all, and what its real daily allowance is.
-function applyProviderVerdict(candidate, result) {
+function applyProviderVerdict(
+  candidate,
+  result,
+  { allowNoFreeTier = true, allowZeroBalance = true } = {},
+) {
   const key = candidateKey(candidate);
   const body = result.errorBody;
   if (!body) return 0;
@@ -1476,10 +1376,19 @@ function applyProviderVerdict(candidate, result) {
     return 0;
   }
 
+  const zeroBalance = zeroBalanceRejection(result.status, body);
+  if (zeroBalance) {
+    if (!allowZeroBalance) return 0;
+    setModelVerdict(key, { free: false, reason: zeroBalance });
+    log(`excluding ${key}: ${zeroBalance}`);
+    return 0;
+  }
+
   const quota = parseQuotaFailure(body);
   if (!quota) return 0;
 
   if (quota.noFreeTier) {
+    if (!allowNoFreeTier) return 0;
     // Every free-tier allowance is zero, so no amount of waiting helps.
     setModelVerdict(key, { free: false, reason: 'no free-tier allowance (limit 0)' });
     log(`excluding ${key}: provider reports no free-tier quota`);
@@ -1885,15 +1794,8 @@ function routeStatus() {
     routes[name] = candidates.map((candidate, priority) => {
       const key = candidateKey(candidate);
       const model = candidateMetadata(candidate);
-      // Per-key cooldowns share a `provider:model#slot` prefix; the status
-      // shows the worst one so the UI reflects a spent quota even when only
-      // one of several keys is cooling down.
-      let cooldown = cooldowns.get(key);
-      for (const [storedKey, entry] of cooldowns) {
-        if (storedKey !== key && !storedKey.startsWith(`${key}#`)) continue;
-        if (entry.until <= now) continue;
-        if (!cooldown || entry.until > cooldown.until) cooldown = entry;
-      }
+      // The model remains ready while at least one usable key is ready.
+      const cooldown = aggregateCooldown(candidate, now);
       const pinned = PINNED_MODELS.has(key) || PINNED_MODELS.has(candidate.model);
       return {
         priority: priority + 1,
@@ -1948,6 +1850,7 @@ async function handleChat(req, res) {
 
   const failures = [];
   const failedProviders = new Set();
+  const rotatedProviders = new Set();
   const clientController = new AbortController();
   res.on('close', () => {
     if (!res.writableEnded) clientController.abort();
@@ -1960,13 +1863,21 @@ async function handleChat(req, res) {
     // round-robin order. A 401 retires just that key; rate limits cool down
     // just that key.
     const slots = registry.keySlots(candidate.provider);
-    registry.rotateKeyCursor(candidate.provider);
-    const attempts = slots.length ? slots : [null];
-    let candidateOk = false;
+    if (!slots.length) {
+      failedProviders.add(candidate.provider);
+      continue;
+    }
+    const ready = slots.filter((slot) => cooldownRemaining(candidate, slot) === 0);
+    const attempts = ready.length ? ready : slots;
+    if (!rotatedProviders.has(candidate.provider)) {
+      registry.rotateKeyCursor(candidate.provider);
+      rotatedProviders.add(candidate.provider);
+    }
+    let noFreeTierFailures = 0;
+    let zeroBalanceFailures = 0;
     for (const slot of attempts) {
       if (clientController.signal.aborted) return;
-      if (slot && cooldownRemaining(candidate, slot) > 0) continue;
-      const slotLabel = slot ? ` [${slot.name}]` : '';
+      const slotLabel = ` [${slot.name}]`;
       log(`trying ${candidateKey(candidate)}${slotLabel} for ${requestedModel}`);
       const result = body.stream
         ? await attemptStream(candidate, body, res, clientController.signal, slot)
@@ -1997,16 +1908,28 @@ async function handleChat(req, res) {
       failures.push({
         provider: candidate.provider,
         model: candidate.model,
-        key: slot?.name || undefined,
+        key: slot.name,
         status: result.status,
         reason: result.reason,
       });
-      const providerWaitMs = applyProviderVerdict(candidate, result);
+      const quota = parseQuotaFailure(result.errorBody);
+      if (quota?.noFreeTier) noFreeTierFailures += 1;
+      const zeroBalance = zeroBalanceRejection(result.status, result.errorBody);
+      if (zeroBalance) zeroBalanceFailures += 1;
+      const providerWaitMs = applyProviderVerdict(candidate, result, {
+        allowNoFreeTier: false,
+        allowZeroBalance: false,
+      });
       if (result.kind) setCooldown(candidate, result.kind, result.reason, providerWaitMs, slot);
+      if (zeroBalance) setCooldown(candidate, 'forbidden', zeroBalance, 0, slot);
       log(`failed ${candidateKey(candidate)}${slotLabel}: ${result.status} ${result.reason}`);
+      if (zeroBalance && attempts.length > 1) {
+        log(`key [${slot.name}] for ${candidate.provider} has zero balance; trying next key`);
+        continue;
+      }
       if (result.fatal) {
         // Wrong key: retire it and try the next key on the same candidate.
-        if (slot?.key && result.status === 401) {
+        if (result.status === 401) {
           registry.markKeyInvalid(candidate.provider, slot.key);
           log(`retired key [${slot.name}] for ${candidate.provider}: 401`);
           continue;
@@ -2021,15 +1944,30 @@ async function handleChat(req, res) {
         break;
       }
       // Rate limit / timeout on this key: try the next key before moving on.
-      if (attempts.length > 1 && (result.status === 429 || result.status === 504 || result.kind === 'timeout')) {
+      if (
+        attempts.length > 1 &&
+        (result.status === 429 ||
+          result.status === 504 ||
+          result.kind === 'timeout' ||
+          result.kind === 'serverError')
+      ) {
         continue;
       }
       break;
     }
-    // All keys for this provider failed fatally: skip the rest of its models.
-    if (failures.length && failures[failures.length - 1]?.status === 401) {
-      const remainingSlots = registry.keySlots(candidate.provider);
-      if (!remainingSlots.length) failedProviders.add(candidate.provider);
+    if (
+      attempts.length === slots.length &&
+      noFreeTierFailures + zeroBalanceFailures === slots.length
+    ) {
+      const key = candidateKey(candidate);
+      const reason = zeroBalanceFailures
+        ? 'no usable key has free credit'
+        : 'no free-tier allowance (limit 0)';
+      setModelVerdict(key, { free: false, reason });
+      log(`excluding ${key}: ${reason}`);
+    }
+    if (!registry.hasUsableKey(PROVIDERS.get(candidate.provider))) {
+      failedProviders.add(candidate.provider);
     }
   }
 
@@ -2049,33 +1987,15 @@ function isLoopbackAddress(address) {
   return plain === '::1' || plain === '127.0.0.1' || plain.startsWith('127.');
 }
 
-// LAN-ready guard: the loopback-only restriction is gone. Protection now
-// comes from authentication instead of the network:
-//   - web UI + management APIs require the admin session (password login);
-//   - /v1/* requires a gateway API key once one is configured.
-// What remains here is CSRF/rebinding hygiene, now LAN-aware:
-//   - cross-site browser requests are blocked (Sec-Fetch-Site);
-//   - the Host header must be loopback, a private LAN IP, or a local
-//     hostname (.local / single-label); a public domain (DNS rebinding)
-//     is rejected;
-//   - a forged Origin that does not match the request host is rejected,
-//     while same-host LAN origins are allowed.
+// The management interface has no login because it is local-only. Require a
+// loopback peer and loopback Host/Origin, and reject cross-site browser calls.
 // A plain curl call sends neither Origin nor Sec-Fetch-Site and is allowed.
-function isLocalHost(hostname) {
-  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!host) return true;
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
-  if (host === '::1' || host === '127.0.0.1' || host.startsWith('127.') || host === '[::1]') return true;
-  if (/^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)) return true;
-  if (/^(fc[0-9a-f]{2}|fd[0-9a-f]{2}|fe80):/i.test(host)) return true;
-  if (!host.includes('.') && /^[a-z0-9-]+$/i.test(host)) return true;
-  return false;
-}
-
 function uiGuardFailure(req) {
+  if (!isLoopbackAddress(req.socket?.remoteAddress)) return 'requests must come from loopback';
+
   const host = String(req.headers.host || '');
   const hostname = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-  if (hostname && !isLocalHost(hostname)) {
+  if (hostname && hostname !== 'localhost' && !isLoopbackAddress(hostname)) {
     return `unexpected Host header: ${host}`;
   }
 
@@ -2092,21 +2012,9 @@ function uiGuardFailure(req) {
     } catch {
       return `invalid Origin header: ${origin}`;
     }
-    const sameHost = originHost.toLowerCase() === hostname.toLowerCase();
-    if (!sameHost && !isLocalHost(originHost)) {
+    if (originHost !== 'localhost' && !isLoopbackAddress(originHost)) {
       return `unexpected Origin header: ${origin}`;
     }
-  }
-  return '';
-}
-
-function webuiAuthFailure(req) {
-  const token = webuiSessionToken(req);
-  if (!token || !webuiSessions.has(token)) return 'web UI login required';
-  const expiresAt = webuiSessions.get(token);
-  if (expiresAt <= Date.now()) {
-    webuiSessions.delete(token);
-    return 'session expired, please log in again';
   }
   return '';
 }
@@ -2172,7 +2080,16 @@ function uiRouteState() {
 function providerFileKeys(name) {
   const raw = config.providers?.[name];
   if (!raw || typeof raw !== 'object') return [];
-  return Array.isArray(raw.keys) ? raw.keys : [];
+  return (Array.isArray(raw.keys) ? raw.keys : raw.keys ? [raw.keys] : [])
+    .map((entry, index) =>
+      typeof entry === 'string'
+        ? { name: `key-${index + 1}`, key: entry.trim() }
+        : {
+            name: String(entry?.name || `key-${index + 1}`).trim(),
+            key: String(entry?.key || '').trim(),
+          },
+    )
+    .filter((entry) => entry.key);
 }
 
 // Named multi-key write path. Body variants:
@@ -2218,8 +2135,8 @@ async function handleKeyUpdate(req, res) {
       .filter((entry) => String(entry?.name || '') !== keyName)
       .map((entry) => ({ name: String(entry.name), key: String(entry.key || '') }));
     if (key) next.push({ name: keyName, key });
-    editableProviderRaw(name);
     registry.setProviderKeys(name, next);
+    setOverlayValue(['providers', name, 'keys'], structuredClone(provider.configRef.keys));
     try {
       persistOverlayFile();
     } catch (error) {
@@ -2237,7 +2154,12 @@ async function handleKeyUpdate(req, res) {
         log(`catalog refresh after key change failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return sendJson(res, 200, { ok: true, provider: name, name: keyName, configured: Boolean(key) });
+    return sendJson(res, 200, {
+      ok: true,
+      provider: name,
+      name: keyName,
+      configured: registry.hasUsableKey(provider),
+    });
   }
 
   try {
@@ -2260,122 +2182,11 @@ async function handleKeyUpdate(req, res) {
       log(`catalog refresh after key change failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return sendJson(res, 200, { ok: true, provider: name, configured: Boolean(key) });
-}
-
-function randomGatewayKey() {
-  return `sk-fr-${crypto.randomBytes(24).toString('base64url')}`;
-}
-
-// Gateway client keys (downstream). Creating the first key enables auth;
-// the full key value is returned only once at creation.
-async function handleGatewayKeys(req, res) {
-  let body;
-  try {
-    body = await readJson(req, 64 * 1024);
-  } catch (error) {
-    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
-  }
-  const action = String(body.action || 'create');
-  if (action === 'setRequireAuth') {
-    setOverlayValue(['gateway', 'requireAuth'], Boolean(body.requireAuth));
-    if (gatewayAuthRequired() && !gatewayKeys().length) {
-      setOverlayValue(['gateway', 'requireAuth'], false);
-      return sendJson(res, 400, {
-        error: { message: 'create at least one API key before enabling auth', type: 'invalid_request_error' },
-      });
-    }
-    try {
-      persistOverlayFile();
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return sendJson(res, 500, {
-        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
-      });
-    }
-    refreshSecretRedactor();
-    return sendJson(res, 200, { ok: true, requireAuth: gatewayAuthRequired() });
-  }
-
-  if (action === 'delete') {
-    const keyName = String(body.name || '');
-    const kept = gatewayKeys().filter((entry) => entry?.name !== keyName);
-    if (kept.length === gatewayKeys().length) {
-      return sendJson(res, 404, { error: { message: `unknown key: ${keyName}`, type: 'not_found' } });
-    }
-    setOverlayValue(['gateway', 'keys'], kept);
-    if (!kept.length) setOverlayValue(['gateway', 'requireAuth'], false);
-    try {
-      persistOverlayFile();
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return sendJson(res, 500, {
-        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
-      });
-    }
-    refreshSecretRedactor();
-    log(`deleted gateway API key [${keyName}] via web interface`);
-    return sendJson(res, 200, { ok: true });
-  }
-
-  if (action === 'create') {
-    const keyName = String(body.name || '').trim().slice(0, 64);
-    if (!keyName) {
-      return sendJson(res, 400, { error: { message: 'name is required', type: 'invalid_request_error' } });
-    }
-    if (gatewayKeys().some((entry) => entry?.name === keyName)) {
-      return sendJson(res, 400, { error: { message: `key already exists: ${keyName}`, type: 'invalid_request_error' } });
-    }
-    const value = typeof body.key === 'string' && body.key.trim() ? body.key.trim() : randomGatewayKey();
-    const problem = validateSecret(value);
-    if (problem) {
-      return sendJson(res, 400, { error: { message: problem, type: 'invalid_request_error' } });
-    }
-    setOverlayValue(['gateway', 'keys'], [
-      ...gatewayKeys(),
-      { name: keyName, key: value, createdAt: new Date().toISOString() },
-    ]);
-    setOverlayValue(['gateway', 'requireAuth'], true);
-    try {
-      persistOverlayFile();
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return sendJson(res, 500, {
-        error: { message: `could not write ${OVERLAY_FILENAME}: ${reason}`, type: 'config_write_failed' },
-      });
-    }
-    refreshSecretRedactor();
-    log(`created gateway API key [${keyName}] via web interface`);
-    return sendJson(res, 200, { ok: true, name: keyName, key: value, requireAuth: true });
-  }
-
-  return sendJson(res, 400, { error: { message: `unknown action: ${action}`, type: 'invalid_request_error' } });
-}
-
-async function handleWebuiPassword(req, res) {
-  let body;
-  try {
-    body = await readJson(req, 64 * 1024);
-  } catch (error) {
-    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
-  }
-  const password = typeof body.password === 'string' ? body.password : '';
-  const problem = validateSecret(password);
-  if (problem || !password) {
-    return sendJson(res, 400, {
-      error: { message: problem || 'password is required', type: 'invalid_request_error' },
-    });
-  }
-  config.webui ||= {};
-  if (!setStoredWebuiPassword(hashPassword(password))) {
-    return sendJson(res, 500, {
-      error: { message: `could not write ${OVERLAY_FILENAME}`, type: 'config_write_failed' },
-    });
-  }
-  webuiSessions.clear();
-  refreshSecretRedactor();
-  log('web UI password changed via web interface; all sessions revoked');
-  return sendJson(res, 200, { ok: true });
+  return sendJson(res, 200, {
+    ok: true,
+    provider: name,
+    configured: registry.hasUsableKey(provider),
+  });
 }
 
 async function handleServerConfig(req, res) {
@@ -2386,14 +2197,6 @@ async function handleServerConfig(req, res) {
     return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
   }
   const notes = [];
-  if (body.host !== undefined) {
-    const host = String(body.host || '').trim();
-    if (!host) {
-      return sendJson(res, 400, { error: { message: 'host is required', type: 'invalid_request_error' } });
-    }
-    setOverlayValue(['host'], host);
-    notes.push('host saved; restart to take effect');
-  }
   if (body.port !== undefined) {
     const port = Number(body.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -2416,7 +2219,10 @@ async function handleServerConfig(req, res) {
 // ---- Editable configuration (web UI settings tabs) ----
 
 function routeEntryString(entry) {
-  if (typeof entry === 'string') return entry;
+  if (typeof entry === 'string') {
+    const model = entry.trim();
+    return model ? `${registry.defaultProvider}:${model}` : '';
+  }
   if (entry && typeof entry === 'object') {
     const provider = String(entry.provider || '');
     const model = String(entry.model || entry.id || '');
@@ -2852,14 +2658,6 @@ async function handleSettings(req, res) {
     setOverlayValue(['usage', 'timezone'], String(body.timezone || ''));
     notes.push('timezone saved; restart to take effect');
   }
-  if (body.sessionTtlHours !== undefined) {
-    const value = Number(body.sessionTtlHours);
-    if (!Number.isFinite(value) || value < 0 || value > 8760) {
-      return sendJson(res, 400, { error: { message: 'sessionTtlHours must be 0-8760 (0 = never expires)', type: 'invalid_request_error' } });
-    }
-    setOverlayValue(['webui', 'sessionTtlHours'], value);
-    notes.push(value === 0 ? 'sessions never expire' : `sessions expire after ${value} hour(s); existing sessions keep their old expiry`);
-  }
   if (body.dismissMigrationNotice === true) {
     deleteOverlayValue(['migratedFromEnv']);
   }
@@ -2887,37 +2685,6 @@ async function handleRestart(req, res) {
     }
     setTimeout(() => process.exit(0), 3000).unref?.();
   }, 300).unref?.();
-}
-
-async function handleLogin(req, res) {
-  let body;
-  try {
-    body = await readJson(req, 64 * 1024);
-  } catch (error) {
-    return sendJson(res, 400, { error: { message: String(error), type: 'invalid_request_error' } });
-  }
-  const password = typeof body.password === 'string' ? body.password : '';
-  if (!checkWebuiPassword(password)) {
-    return sendJson(res, 401, { error: { message: 'invalid password', type: 'unauthorized' } });
-  }
-  upgradePasswordStorage('login');
-  const token = crypto.randomBytes(32).toString('hex');
-  pruneWebuiSessions();
-  const ttlHours = sessionTtlHours();
-  const expiresAt = ttlHours > 0 ? Date.now() + Math.round(ttlHours * 3600000) : Number.POSITIVE_INFINITY;
-  webuiSessions.set(token, expiresAt);
-  // Cookie lifetime mirrors the server-side TTL; "never" becomes a browser
-  // session cookie so it still dies with the browser.
-  const maxAge = ttlHours > 0 ? `; Max-Age=${Math.round(ttlHours * 3600)}` : '';
-  res.writeHead(200, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Set-Cookie': `fr_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax${maxAge}`,
-    'Cache-Control': 'no-store',
-  });
-  return res.end(JSON.stringify({
-    ok: true,
-    expiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
-  }));
 }
 
 async function handler(req, res) {
@@ -2950,25 +2717,6 @@ async function handler(req, res) {
     });
     return res.end(page);
   }
-  // Login is public (it is the gate itself); logout needs no session either.
-  if (req.method === 'POST' && url.pathname === '/api/login') {
-    return handleLogin(req, res);
-  }
-  if (req.method === 'POST' && url.pathname === '/api/logout') {
-    webuiSessions.delete(webuiSessionToken(req));
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Set-Cookie': 'fr_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
-      'Cache-Control': 'no-store',
-    });
-    return res.end(JSON.stringify({ ok: true }));
-  }
-  if (isUiPath && url.pathname.startsWith('/api/')) {
-    const authFailure = webuiAuthFailure(req);
-    if (authFailure) {
-      return sendJson(res, 401, { error: { message: authFailure, type: 'unauthorized' } });
-    }
-  }
   if (req.method === 'GET' && url.pathname === '/api/state') {
     await refreshCatalog();
     return sendJson(
@@ -2982,24 +2730,6 @@ async function handler(req, res) {
         overlayFile: displayPath(OVERLAY_PATH),
         route: DISCOVERY_ROUTE,
         server: { host: config.host, port: config.port, runningHost: HOST, runningPort: PORT },
-        gateway: {
-          requireAuth: gatewayAuthRequired(),
-          keys: gatewayKeys().map((entry) => ({
-            name: entry.name,
-            masked: maskSecret(entry.key),
-            createdAt: entry.createdAt || null,
-          })),
-        },
-        webui: {
-          defaultPassword: isDefaultPassword(),
-          sessionTtlHours: sessionTtlHours(),
-          sessionExpiresAt: (() => {
-            const expiresAt = webuiSessions.get(webuiSessionToken(req));
-            return expiresAt === undefined
-              ? null
-              : Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null;
-          })(),
-        },
         providers: uiProviderState(),
         usage: usageSummary(),
         routes: uiRouteState(),
@@ -3015,12 +2745,6 @@ async function handler(req, res) {
   }
   if (req.method === 'POST' && url.pathname === '/api/keys') {
     return handleKeyUpdate(req, res);
-  }
-  if (req.method === 'POST' && url.pathname === '/api/gateway-keys') {
-    return handleGatewayKeys(req, res);
-  }
-  if (req.method === 'POST' && url.pathname === '/api/webui-password') {
-    return handleWebuiPassword(req, res);
   }
   if (req.method === 'POST' && url.pathname === '/api/server') {
     return handleServerConfig(req, res);
@@ -3084,10 +2808,6 @@ async function handler(req, res) {
     });
   }
   if (req.method === 'GET' && url.pathname === '/v1/models') {
-    const gatewayFailure = gatewayGuardFailure(req);
-    if (gatewayFailure) {
-      return sendJson(res, 401, { error: { message: gatewayFailure, type: 'unauthorized' } });
-    }
     await refreshCatalog();
     const routeModels = Object.keys(config.routes || {}).map((id) => ({
       id,
@@ -3109,10 +2829,6 @@ async function handler(req, res) {
     });
   }
   if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
-    const gatewayFailure = gatewayGuardFailure(req);
-    if (gatewayFailure) {
-      return sendJson(res, 401, { error: { message: gatewayFailure, type: 'unauthorized' } });
-    }
     return handleChat(req, res);
   }
   return sendJson(res, 404, {
@@ -3140,12 +2856,6 @@ server.keepAliveTimeout = 5000;
 server.listen(PORT, HOST, async () => {
   log(`Free Router ${VERSION} listening on http://${HOST}:${PORT}/v1 (config: ${displayPath(CONFIG_PATH)}, ${CONFIG_FORMAT})`);
   if (UI_ENABLED) log(`web interface on http://${HOST}:${PORT}/`);
-  if (gatewayAuthRequired()) {
-    log(`gateway auth enabled (${gatewayKeys().length} API key(s))`);
-  } else {
-    log('warning: gateway auth is disabled; anyone on the network can call /v1');
-  }
-  if (isDefaultPassword()) log('warning: web UI still uses the default password "admin123"');
   for (const provider of PROVIDERS.values()) {
     if (!registry.hasUsableKey(provider)) log(`warning: ${provider.keyEnv} is missing`);
     else if (provider.apiKeys.length > 1) log(`${provider.name}: ${provider.apiKeys.length} keys configured`);

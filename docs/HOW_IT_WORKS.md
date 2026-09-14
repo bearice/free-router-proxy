@@ -70,13 +70,11 @@ cp .env.example .env
 docker compose up -d
 ```
 
-The gateway is reachable at `http://127.0.0.1:8787/v1` by default; set
-`FREE_ROUTER_HOST=0.0.0.0` (already the Docker default) and publish the port
-to allow LAN access — but create a gateway API key and change the admin
-password first (see LAN access below). Keys are injected at runtime from
-`.env` and never baked into the image. Weekly-discovery state is ephemeral:
-it lives inside the container and is reset on rebuild (the gateway
-re-discovers free models on the weekly schedule).
+The gateway is reachable at `http://127.0.0.1:8787/v1`. The container process
+binds `0.0.0.0` so Docker port forwarding works, while Compose publishes it
+only on the host loopback address. Keys are injected at runtime from `.env`
+and never baked into the image. Weekly-discovery state is ephemeral: it lives
+inside the container and is reset on rebuild.
 
 ```bash
 docker compose ps
@@ -112,12 +110,9 @@ See where requests actually landed, and how much of today's quota is left:
 
 ## Web interface
 
-Open <http://127.0.0.1:8787/> and log in (default password `admin123`, change
-it in Settings → Admin). The interface has tabs for status, access keys,
+Open <http://127.0.0.1:8787/>. The local-only interface has tabs for status,
 providers, routes, quotas, and settings, follows the browser language, and
-applies every change to the running process immediately — except host, port,
-and a few marked settings, which need a restart (there is a Restart button
-next to Save; under Docker the supervisor brings the server back up).
+applies most changes immediately. Port and marked settings need a restart.
 
 ```json
 "webui": {
@@ -127,22 +122,6 @@ next to Save; under Docker the supervisor brings the server back up).
 ```
 
 Set `enabled: false` to remove `/` and `/api/*` entirely.
-
-### Authentication model
-
-There are two independent gates:
-
-- **Web UI + management APIs** (`/`, `/api/*`): admin password login issuing
-  an `HttpOnly` session cookie. Sessions expire after
-  `webui.sessionTtlHours` (default 24, `0` means never, browser-session
-  cookie in that case). Changing the password revokes all sessions.
-- **Gateway API** (`/v1/*`): bearer keys once at least one exists (Access
-  tab). Without any gateway key, `/v1` stays open for local use.
-
-On top of authentication, browser-driven abuse is still filtered: cross-site
-requests per `Sec-Fetch-Site` are rejected, and a `Host` header pointing at a
-public domain (DNS rebinding) is rejected while loopback, LAN, and `.local`
-names are accepted. A plain `curl` call sends neither header and still works.
 
 ### Why the key endpoints need care
 
@@ -157,30 +136,9 @@ write path is therefore constrained:
   a second assignment.
 - The env file is written atomically with mode `0600`, and an existing file is
   chmod'ed down to match.
-- Keys are returned masked, never in full (a new gateway key is shown once,
-  at creation).
+- Keys are returned masked, never in full.
 - The secret redactor is rebuilt after a key change, so a key added through the
   UI is still stripped from upstream payloads.
-
-## LAN access
-
-1. Bind wider: `FREE_ROUTER_HOST=0.0.0.0` and publish the port
-   (`8787:8787` in `docker-compose.yml`, plus any host firewall rule).
-2. In the web UI, create a gateway API key (Access tab) and change the admin
-   password (Settings tab). The status tab links directly to both until done.
-3. Call `/v1/*` with `Authorization: Bearer <key>`; open the UI from any LAN
-   browser and log in.
-
-The admin password is stored as a salted scrypt hash, never plaintext.
-`FREE_ROUTER_WEBUI_PASSWORD` overrides it for emergency recovery.
-
-## Gateway API keys
-
-Named client credentials (`sk-fr-…`, shown once at creation) for anything
-calling `/v1/*`. Creating the first key enables auth; deleting the last one
-disables it again (or flip the switch in the Access title row — it refuses to
-enable with zero keys). Keys are checked on `/v1/models` and
-`/v1/chat/completions`; `/health` stays open for container probes.
 
 ## Provider keys (multi-account)
 
@@ -192,10 +150,9 @@ variable, then the plurals, deduplicated by value. Requests rotate across
 them; a `401` retires only that key, rate limits and timeouts cool down only
 that key, and the next key is tried before moving to the next model.
 
-On first boot, keys found in `.env` are imported into `config.local.json`
-once (named `migrated-N`) and removed from `.env`, with a dismissible notice
-in the UI. A personal `FREE_ROUTER_API_KEY` in `.env` additionally becomes a
-named gateway key (it stays in `.env` too, since `models.sh` needs it).
+On first boot, provider keys found in `.env` are imported into
+`config.local.json` once (named `migrated-N`) and removed from `.env`, with a
+dismissible notice in the UI.
 
 ## Layered configuration
 
@@ -220,17 +177,14 @@ Consequences worth knowing:
 
 ## Use with any OpenAI-compatible client
 
-Point the client at the gateway and, when gateway auth is on, send any of
-your gateway keys as the bearer token (with auth off, any placeholder like
-`local` works). Upstream provider keys stay on the gateway. Keep a
-localhost-only bind if you never enabled auth.
+Point the client at the local gateway. Upstream provider keys stay on the
+gateway; clients may use a placeholder API key such as `local`.
 
 **curl**
 
 ```bash
 curl -s http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-fr-...' \
   -d '{
     "model": "free-best",
     "messages": [{"role": "user", "content": "Reply with exactly: router-ok"}]
@@ -274,23 +228,19 @@ The selected upstream is returned in `X-Free-Router-Provider` and
 ## Endpoints
 
 ```text
-GET  /                       web interface (login required)
-POST /api/login              { "password": "..." } -> session cookie
-POST /api/logout             revoke current session
-GET  /api/state              full UI state (session required)
+GET  /                       local-only web interface
+GET  /api/state              full UI state
 POST /api/keys               provider keys: { "provider", "name"?, "key" }
-POST /api/gateway-keys       gateway keys: { "action": "create|delete|setRequireAuth", ... }
 POST /api/providers          { "action": "create|update|delete", ... }
 POST /api/routes             { "action": "save|delete", "route", "models" }
 POST /api/limits             daily limits: { "action": "set|delete", "key", "limit" }
 POST /api/discovery          discovery toggles, provider, interval, pins
-POST /api/settings           tuning knobs, session TTL, migration notice
-POST /api/webui-password     { "password": "..." } (stored hashed, revokes sessions)
-POST /api/server             { "host", "port" } (restart to apply)
-POST /api/restart            exit for supervisor restart (session required)
+POST /api/settings           tuning knobs and migration notice
+POST /api/server             { "port" } (restart to apply)
+POST /api/restart            exit for supervisor restart
 GET  /health
-GET  /v1/models              gateway key required once auth is on
-POST /v1/chat/completions    gateway key required once auth is on
+GET  /v1/models
+POST /v1/chat/completions
 ```
 
 `GET /health` reports `version` from `package.json` (currently `1.0.0`). Releases are
@@ -620,7 +570,7 @@ journalctl --user -u free-router-proxy -f
    successful responses. A `401` retires only that key; other keys keep serving.
 10. Before sending a request upstream, redacts values of `*_API_KEY` / `*_TOKEN` /
    `*_SECRET` / `*_PASSWORD` from the local environment (including provider
-   keys, gateway keys, and the admin password), and `NAME=...` assignment
+   keys), and `NAME=...` assignment
    lines for those names. This cannot stop Hermes from reading `.env` locally; it
    only keeps those values out of OpenRouter, TokenRouter, and B.AI payloads.
 11. Buffers reasoning-only stream chunks. Nothing is sent to the client until a

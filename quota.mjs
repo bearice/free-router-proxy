@@ -131,6 +131,20 @@ export function permanentRejection(status, payload) {
   return '';
 }
 
+// Some OpenAI-compatible providers report an account-level empty balance as
+// a model request error. It is not transient, but another key may belong to an
+// account with credit, so callers decide whether every key has failed before
+// excluding the model.
+export function zeroBalanceRejection(status, payload) {
+  if (![400, 402, 403].includes(Number(status))) return '';
+  const message = String(payload?.error?.message || payload?.message || payload || '');
+  const zeroBalance = /\bbalance\s*[:=]\s*0+(?:\.0+)?(?:\b|$)/i.test(message);
+  const insufficient =
+    /(?:credit|balance).{0,48}(?:insufficient|not enough)/i.test(message) ||
+    /(?:insufficient|not enough).{0,48}(?:credit|balance)/i.test(message);
+  return zeroBalance && insufficient ? 'provider account balance is zero' : '';
+}
+
 // Free-tier daily quotas reset at midnight US Pacific. Cooling down for a fixed
 // interval instead would either retry all night for nothing or idle past the
 // reset, so compute the actual wait.

@@ -24,10 +24,8 @@ cp .env.example .env
 ```
 
 Stop with `./stop.sh`. Docker: `docker compose up -d`. Open
-<http://127.0.0.1:8787/> to log in (default password `admin123`), set keys
-and watch usage. The interface has tabs for status, access keys, providers,
-routes, quotas, and settings — almost everything is configurable there, and
-it follows your browser language (12 languages included).
+<http://127.0.0.1:8787/> to set keys, manage routing, and watch usage. The
+local-only interface follows your browser language (12 languages included).
 
 | Variable | Where |
 | --- | --- |
@@ -42,24 +40,6 @@ the web UI — requests rotate across them automatically.
 
 More providers: add a block in `config.json`, or add one in the web UI with
 just a name and a base URL. See [How it works](docs/HOW_IT_WORKS.md).
-
-## LAN access
-
-Set `FREE_ROUTER_HOST=0.0.0.0` (already the Docker default) and open the port
-in `docker-compose.yml`. Then, before exposing anything:
-
-1. Create a gateway API key in the web UI (Access tab) — `/v1/*` requires
-   `Authorization: Bearer <key>` once a key exists.
-2. Change the admin password (Settings tab).
-
-Call it like any OpenAI endpoint, plus the key:
-
-```bash
-curl -s http://<lan-ip>:8787/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-fr-...' \
-  -d '{"model": "free-best", "messages": [{"role": "user", "content": "hi"}]}'
-```
 
 ## Configuration layers
 

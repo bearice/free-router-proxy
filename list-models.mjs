@@ -43,8 +43,6 @@ function loadConfigLite(configPath) {
   }
 }
 const config = loadConfigLite(CONFIG_PATH);
-const GATEWAY_KEY = process.env.FREE_ROUTER_API_KEY || '';
-const authHeaders = GATEWAY_KEY ? { Authorization: `Bearer ${GATEWAY_KEY}` } : {};
 const HOST = process.env.FREE_ROUTER_HOST || config.host || '127.0.0.1';
 const PORT = Number(process.env.FREE_ROUTER_PORT || config.port || 8787);
 const DEFAULT_ROUTE = config.discovery?.route || 'free-best';
@@ -251,7 +249,7 @@ async function main() {
   const url = `http://${HOST}:${PORT}/health`;
   let health;
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(5000), headers: authHeaders });
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     health = await response.json();
   } catch (error) {

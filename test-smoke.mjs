@@ -7,8 +7,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { isChatModel, normalizeCatalogPayload, normalizeModelSlug, supportsRequest } from './providers.mjs';
-import { msUntilQuotaReset, parseQuotaFailure, permanentRejection } from './quota.mjs';
+import {
+  createProviderRegistry,
+  isChatModel,
+  normalizeCatalogPayload,
+  normalizeModelSlug,
+  supportsRequest,
+} from './providers.mjs';
+import {
+  msUntilQuotaReset,
+  parseQuotaFailure,
+  permanentRejection,
+  zeroBalanceRejection,
+} from './quota.mjs';
 import {
   SKIP_THOUGHT_SIGNATURE,
   createStreamSignatureExtractor,
@@ -20,12 +31,12 @@ import {
   rememberSignaturesFromPayload,
 } from './thought-signature.mjs';
 import { displayPath, maskSecret, validateSecret } from './ui.mjs';
-import { hashPassword, isPasswordHash, verifyPassword } from './auth.mjs';
 import {
   addMissingKeys,
   buildLiveConfig,
   deepMerge,
   defaultConfigObject,
+  providerKeysFromConfig,
   runOverlayMigrations,
   SCHEMA_VERSION,
 } from './config.mjs';
@@ -38,6 +49,65 @@ assert.match(PACKAGE_VERSION, /^\d+\.\d+\.\d+$/);
 assert.equal(normalizeModelSlug('google/gemini-3.8-flash:free'), 'gemini-3.8-flash');
 assert.equal(normalizeModelSlug('gemini-3.8-flash'), 'gemini-3.8-flash');
 assert.equal(normalizeModelSlug('acme/extra-1:free'), 'extra-1');
+
+{
+  process.env.TEST_MULTI_API_KEY = ' duplicate ';
+  process.env.TEST_MULTI_API_KEYS = 'duplicate, key-a ,key-b';
+  process.env.TEST_MULTI_API_KEY_KEYS = 'key-b,key-c';
+  const resolved = providerKeysFromConfig('testmulti', {
+    keyEnv: 'TEST_MULTI_API_KEY',
+    keys: [{ name: ' saved ', key: ' file-key ' }, { name: 'duplicate', key: ' duplicate ' }],
+  });
+  assert.equal(resolved.keys[0].name, 'saved');
+  assert.deepEqual(resolved.keys.map(({ key }) => key), [
+    'file-key',
+    'duplicate',
+    'key-a',
+    'key-b',
+    'key-c',
+  ]);
+  const registry = createProviderRegistry(
+    {
+      providers: {
+        testmulti: {
+          baseUrl: 'http://127.0.0.1',
+          keyEnv: 'TEST_MULTI_API_KEY',
+          keys: [{ name: 'saved', key: 'file-key' }],
+          freeModels: ['model'],
+        },
+      },
+    },
+    { host: '127.0.0.1', port: 8787 },
+  );
+  assert.equal(registry.keySlots('testmulti')[0].key, 'file-key');
+  registry.rotateKeyCursor('testmulti');
+  assert.equal(registry.keySlots('testmulti')[0].key, 'duplicate');
+  registry.setApiKey('testmulti', 'replacement');
+  assert.deepEqual(registry.providers.get('testmulti').apiKeys.map(({ key }) => key), [
+    'file-key',
+    'replacement',
+    'duplicate',
+    'key-a',
+    'key-b',
+    'key-c',
+  ]);
+  registry.setApiKey('testmulti', '');
+  assert.deepEqual(registry.providers.get('testmulti').apiKeys.map(({ key }) => key), [
+    'file-key',
+    'duplicate',
+    'key-a',
+    'key-b',
+    'key-c',
+  ]);
+  for (const { key } of registry.keySlots('testmulti')) registry.markKeyInvalid('testmulti', key);
+  assert.deepEqual(registry.keySlots('testmulti'), []);
+  assert.equal(registry.hasUsableKey(registry.providers.get('testmulti')), false);
+  assert.equal(providerKeysFromConfig('object-key', { keys: { name: 'main', key: ' value ' } }).keys[0].key, 'value');
+  assert.equal(providerKeysFromConfig('string-key', { keys: ' value ' }).keys[0].key, 'value');
+  delete process.env.TEST_MULTI_API_KEY;
+  delete process.env.TEST_MULTI_API_KEYS;
+  delete process.env.TEST_MULTI_API_KEY_KEYS;
+}
 
 // Google's native listing, in the shape the live API returns it.
 const googleCatalog = normalizeCatalogPayload({
@@ -234,6 +304,19 @@ assert.match(
   /not a chat/,
 );
 assert.equal(permanentRejection(429, { error: { message: 'quota' } }), '');
+assert.equal(
+  zeroBalanceRejection(400, {
+    error: { message: 'credit insufficient balance: balance=0 required=2126' },
+  }),
+  'provider account balance is zero',
+);
+assert.equal(
+  zeroBalanceRejection(400, {
+    error: { message: 'credit insufficient balance: balance=12 required=2126' },
+  }),
+  '',
+);
+assert.equal(zeroBalanceRejection(503, { error: { message: 'balance=0' } }), '');
 
 // A daily quota resets at Pacific midnight, so the wait is until that boundary
 // rather than a fixed interval. In September that is UTC-7, and the result
@@ -251,27 +334,11 @@ assert.equal(displayPath('/etc/free-router/.env'), '/etc/free-router/.env');
 assert.equal(displayPath(''), '');
 
 assert.equal(maskSecret('').length, 0);
-assert.equal(maskSecret('short'), '***** (5)');
-assert.equal(maskSecret('sk-or-v1-0123456789abcdef'), 'sk-or********cdef (25)');
+assert.equal(maskSecret('short'), '*****');
+assert.equal(maskSecret('sk-or-v1-0123456789abcdef'), 'sk-or********cdef');
 assert.equal(maskSecret('sk-or-v1-0123456789abcdef').includes('0123456789'), false);
 assert.match(validateSecret('ok\nNODE_OPTIONS=x'), /newline/);
 assert.equal(validateSecret('sk-normal-key'), '');
-
-// Salted scrypt storage: hash shape, round trip, wrong password, legacy
-// plaintext comparison, and malformed hashes that must fail closed.
-{
-  const hashed = hashPassword('unit-test-pw');
-  assert.equal(isPasswordHash(hashed), true);
-  assert.equal(isPasswordHash('plain'), false);
-  assert.equal(isPasswordHash(''), false);
-  assert.equal(verifyPassword('unit-test-pw', hashed), true);
-  assert.equal(verifyPassword('wrong', hashed), false);
-  assert.equal(verifyPassword('plain', 'plain'), true);
-  assert.equal(verifyPassword('other', 'plain'), false);
-  assert.equal(verifyPassword('x', '$scrypt$broken'), false);
-  assert.equal(verifyPassword('x', '$scrypt$N=16384$r=8$p=1$zz$zz'), false);
-  assert.notEqual(hashPassword('same'), hashPassword('same'));
-}
 
 // Layered config: base defaults + sparse overlay, tombstones for deletions,
 // additive-only schema migrations.
@@ -834,6 +901,35 @@ const quotaMock = http.createServer(async (req, res) => {
   res.writeHead(404).end();
 });
 
+const multiKeyRequests = [];
+const multiKeyMock = http.createServer(async (req, res) => {
+  if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+    res.writeHead(404).end();
+    return;
+  }
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  multiKeyRequests.push(key);
+  if (key === 'bad-key') {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'invalid key' } }));
+    return;
+  }
+  if (key === 'rate-key') {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(quotaRejection(20)));
+    return;
+  }
+  res.setHeader('Content-Type', 'application/json');
+  res.end(
+    JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: key }, finish_reason: 'stop' }],
+    }),
+  );
+});
+
 await listen(mock);
 const mockPort = mock.address().port;
 await listen(quotaMock);
@@ -846,6 +942,8 @@ await listen(extraMock);
 const extraPort = extraMock.address().port;
 await listen(geminiMock);
 const geminiPort = geminiMock.address().port;
+await listen(multiKeyMock);
+const multiKeyPort = multiKeyMock.address().port;
 
 const portProbe = http.createServer();
 await listen(portProbe);
@@ -901,6 +999,21 @@ fs.writeFileSync(
         keyEnv: 'QUOTAMOCK_API_KEY',
         freeModels: ['no-free-tier', 'daily-exhausted'],
       },
+      multikey: {
+        baseUrl: `http://127.0.0.1:${multiKeyPort}/v1`,
+        keyEnv: 'MULTIKEY_API_KEY',
+        freeModels: ['multi-model'],
+      },
+      roundrobin: {
+        baseUrl: `http://127.0.0.1:${multiKeyPort}/v1`,
+        keyEnv: 'ROUNDROBIN_API_KEY',
+        freeModels: ['multi-model'],
+      },
+      cooldownmulti: {
+        baseUrl: `http://127.0.0.1:${multiKeyPort}/v1`,
+        keyEnv: 'COOLDOWNMULTI_API_KEY',
+        freeModels: ['multi-model'],
+      },
     },
     discovery: {
       enabled: true,
@@ -940,6 +1053,9 @@ fs.writeFileSync(
         { provider: 'gemini', model: 'gemini-3.8-flash' },
         { provider: 'gemini', model: 'gemini-3.7-flash' },
       ],
+      'cooldown-route': [
+        { provider: 'cooldownmulti', model: 'multi-model' },
+      ],
     },
   }),
 );
@@ -959,6 +1075,9 @@ const child = spawn(process.execPath, [path.join(HERE, 'server.mjs')], {
     GEMINI_BASE_URL: `http://127.0.0.1:${geminiPort}/v1beta/openai`,
     QUOTAMOCK_API_KEY: 'quota-test-key',
     QUOTAMOCK_BASE_URL: `http://127.0.0.1:${quotaPort}/v1`,
+    MULTIKEY_API_KEYS: 'bad-key,good-key',
+    ROUNDROBIN_API_KEYS: 'round-a,round-b',
+    COOLDOWNMULTI_API_KEYS: 'rate-key,cooldown-good',
     FREE_ROUTER_CONFIG: testConfig,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -1088,6 +1207,29 @@ try {
   );
   const modelsResponse = await fetch(`http://127.0.0.1:${routerPort}/v1/models`);
   assert.equal(modelsResponse.status, 200);
+  const callMulti = async (provider) => {
+    const response = await fetch(`http://127.0.0.1:${routerPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: `${provider}:multi-model`,
+        messages: [{ role: 'user', content: 'multi-key' }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).choices[0].message.content;
+  };
+  assert.equal(await callMulti('multikey'), 'good-key');
+  assert.deepEqual(multiKeyRequests.splice(0), ['bad-key', 'good-key']);
+  assert.deepEqual(
+    [await callMulti('roundrobin'), await callMulti('roundrobin'), await callMulti('roundrobin')],
+    ['round-a', 'round-b', 'round-a'],
+  );
+  assert.deepEqual(multiKeyRequests.splice(0), ['round-a', 'round-b', 'round-a']);
+  assert.equal(await callMulti('cooldownmulti'), 'cooldown-good');
+  assert.deepEqual(multiKeyRequests.splice(0), ['rate-key', 'cooldown-good']);
+  const multiHealth = await fetch(`http://127.0.0.1:${routerPort}/health`).then((res) => res.json());
+  assert.equal(multiHealth.routes['cooldown-route'][0].cooldownSeconds, 0);
   const models = await modelsResponse.json();
   // Exclusion only removes a model from automatic ranking. It stays listed and
   // callable by explicit ID, since asking for it by name is a deliberate choice.
@@ -1096,6 +1238,7 @@ try {
     [
       'test-route',
       'tool-fallback',
+      'cooldown-route',
       'z-ai/glm-5.3-free',
       'glm-5.3-flash',
       'extra-1',
@@ -1103,6 +1246,7 @@ try {
       'gemini-3.7-flash',
       'no-free-tier',
       'daily-exhausted',
+      'multi-model',
       'acme/extra-1:free',
       'mock-a',
       'mock-domain',
@@ -1439,12 +1583,15 @@ try {
       // A probe spends a real request, so it is counted like any other.
       'bai:models/glm-5.3-paid',
       'bai:models/glm-5.3-pro',
+      'cooldownmulti:multi-model',
       'extra:extra-1',
       'gemini:gemini-3.8-flash',
+      'multikey:multi-model',
       'openrouter:acme/extra-1:free',
       'openrouter:mock-new',
       'quotamock:daily-exhausted',
       'quotamock:no-free-tier',
+      'roundrobin:multi-model',
       'tokenrouter:z-ai/glm-5.3-free',
     ],
   );
@@ -1458,13 +1605,10 @@ try {
   assert.equal(usageByKey.get('gemini:gemini-3.8-flash').ok, 5);
   assert.equal(usageByKey.get('gemini:gemini-3.8-flash').fail, 1);
   assert.equal(usageByKey.has('gemini:gemini-3.7-flash'), false);
-  // Eight from routing, plus the successful probe of bai's glm-5.3-pro, plus
-  // five Gemini tool-call round trips.
-  assert.equal(usage.days[0].ok, 14);
-  // Three routing failures, the two deliberate quota rejections, the probe
-  // that found glm-5.3-paid has no free allowance, and one forced Gemini
-  // thought-signature 400.
-  assert.equal(usage.days[0].fail, 7);
+  // Existing routing plus five successful multi-key requests.
+  assert.equal(usage.days[0].ok, 19);
+  // Existing failures plus one retired key and one per-key quota cooldown.
+  assert.equal(usage.days[0].fail, 9);
   assert.equal(usage.days[0].topModel.key, 'gemini:gemini-3.8-flash');
 
   // A daily limit only counts attempts the provider actually served, so the
@@ -1533,6 +1677,22 @@ try {
   const pageHtml = await pageResponse.text();
   assert.match(pageHtml, /Provider keys/);
   assert.match(pageHtml, /Route priority/);
+  assert.match(pageHtml, /key1,key2,key3/);
+  assert.ok(
+    pageHtml.indexOf('<button data-tab="providers"') <
+      pageHtml.indexOf('<button data-tab="routes"') &&
+      pageHtml.indexOf('<button data-tab="routes"') <
+        pageHtml.indexOf('<button data-tab="status"'),
+  );
+  assert.equal(pageHtml.includes('id="endpoint"'), false);
+  assert.equal(pageHtml.includes('data-tab="access"'), false);
+  assert.equal(pageHtml.includes('data-tab="quota"'), false);
+  assert.equal(pageHtml.includes('data-tab="settings"'), false);
+  assert.equal(pageHtml.includes('id="usage"'), false);
+  assert.equal(pageHtml.includes('card_config'), false);
+  assert.equal(pageHtml.includes('id="np-create"'), false);
+  assert.equal(pageHtml.includes('id="login"'), false);
+  assert.equal(pageHtml.includes('admin123'), false);
   assert.equal(pageHtml.includes('Today\'s quota'), false);
   // The page is a template string; an apostrophe in a JS string must not be
   // written as \', or the browser sees a truncated literal and the UI is blank.
@@ -1545,32 +1705,13 @@ try {
   assert.ok(pageHtml.includes('\\{(\\w+)\\}'));
 
   const uiState = await fetch(`${base}/api/state`).then((res) => res.json());
-  assert.equal(uiState.error?.type, 'unauthorized');
-  // Web UI management APIs require the admin session (default password).
-  const loginResponse = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'admin123' }),
-  });
-  assert.equal(loginResponse.status, 200);
-  const sessionCookie = String(loginResponse.headers.get('set-cookie') || '').split(';')[0];
-  assert.match(sessionCookie, /fr_session=/);
-  const badLogin = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'wrong' }),
-  });
-  assert.equal(badLogin.status, 401);
   const uiHeaders = {
     'Content-Type': 'application/json',
-    Cookie: sessionCookie,
     'Sec-Fetch-Site': 'same-origin',
   };
-  const authedState = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) =>
-    res.json(),
-  );
-  assert.equal(authedState.gateway.requireAuth, false);
-  assert.deepEqual(authedState.gateway.keys, []);
+  const sessionCookie = '';
+  const authedState = uiState;
+  assert.ok(authedState.editable.routes['test-route'].includes('openrouter:mock-a'));
   const uiProviders = new Map(authedState.providers.map((entry) => [entry.name, entry]));
   assert.equal(uiProviders.get('bai').configured, true);
   // Gemini is listed first when present; this test config has no gemini, so the
@@ -1683,6 +1824,32 @@ try {
     false,
   );
 
+  // Named UI keys belong only in the sparse local overlay, never config.json
+  // or .env. Deleting the last named key reports the provider as unconfigured.
+  const namedSaved = await fetch(`${base}/api/keys`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ provider: 'bai', name: 'work', key: 'named-bai-key' }),
+  });
+  assert.equal(namedSaved.status, 200);
+  assert.equal((await namedSaved.json()).configured, true);
+  assert.equal(fs.readFileSync(envPath, 'utf8'), '');
+  const namedOverlay = JSON.parse(fs.readFileSync(path.join(tempDir, 'config.local.json'), 'utf8'));
+  assert.deepEqual(namedOverlay.providers.bai, {
+    keys: [{ name: 'work', key: 'named-bai-key' }],
+  });
+  assert.equal(
+    fs.readFileSync(path.join(tempDir, 'config.json'), 'utf8').includes('named-bai-key'),
+    false,
+  );
+  const namedCleared = await fetch(`${base}/api/keys`, {
+    method: 'POST',
+    headers: uiHeaders,
+    body: JSON.stringify({ provider: 'bai', name: 'work', key: '' }),
+  });
+  assert.equal(namedCleared.status, 200);
+  assert.equal((await namedCleared.json()).configured, false);
+
   // Editable-config endpoints: routes, limits, discovery, settings, providers.
   assert.ok(afterClear.editable);
   assert.ok(afterClear.allRoutes['test-route']);
@@ -1693,7 +1860,10 @@ try {
   });
   assert.equal(saveRoute.status, 200);
   const withRoute = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
-  assert.deepEqual(withRoute.editable.routes['smoke-tmp'], ['mock-a', 'tokenrouter:z-ai/glm-5.3-free']);
+  assert.deepEqual(withRoute.editable.routes['smoke-tmp'], [
+    'openrouter:mock-a',
+    'tokenrouter:z-ai/glm-5.3-free',
+  ]);
   const badRoute = await fetch(`${base}/api/routes`, {
     method: 'POST',
     headers: uiHeaders,
@@ -1773,93 +1943,27 @@ try {
   });
   assert.equal(noDefDel.status, 400);
 
-  // Session TTL, free-model counts, env migration record, logout.
-  const ttlBad = await fetch(`${base}/api/settings`, {
-    method: 'POST',
-    headers: uiHeaders,
-    body: JSON.stringify({ sessionTtlHours: -1 }),
-  });
-  assert.equal(ttlBad.status, 400);
-  const ttlSet = await fetch(`${base}/api/settings`, {
-    method: 'POST',
-    headers: uiHeaders,
-    body: JSON.stringify({ sessionTtlHours: 48 }),
-  });
-  assert.equal(ttlSet.status, 200);
-  const ttlState = await fetch(`${base}/api/state`, { headers: { Cookie: sessionCookie } }).then((res) => res.json());
-  assert.equal(ttlState.webui.sessionTtlHours, 48);
-  assert.ok(ttlState.webui.sessionExpiresAt);
-  const ttlNever = await fetch(`${base}/api/settings`, {
-    method: 'POST',
-    headers: uiHeaders,
-    body: JSON.stringify({ sessionTtlHours: 0 }),
-  });
-  assert.equal(ttlNever.status, 200);
-
-  const counts = new Map(ttlState.providers.map((entry) => [entry.name, entry]));
+  const finalState = await fetch(`${base}/api/state`).then((res) => res.json());
+  const counts = new Map(finalState.providers.map((entry) => [entry.name, entry]));
   assert.equal(counts.get('extra').modelCount, 1);
   assert.equal(counts.get('extra').freeCount, 1);
   assert.equal(counts.get('bai').modelCount, 2);
   // bai's key was cleared above, so withdrawals cannot be checked and every
   // allowlisted model counts as available.
   assert.equal(counts.get('bai').freeCount, 2);
-  assert.deepEqual(ttlState.migration.providers, {});
+  assert.deepEqual(finalState.migration.providers, {});
 
-  // Password change persists a salted hash (never plaintext); the old
-  // password stops working and the new one issues a fresh session.
-  const pwChange = await fetch(`${base}/api/webui-password`, {
-    method: 'POST',
-    headers: uiHeaders,
-    body: JSON.stringify({ password: 's3cret-newpw' }),
-  });
-  assert.equal(pwChange.status, 200);
-  // The hash lands in the overlay file; the tracked base config is untouched.
+  // Runtime settings land in the overlay; the tracked base stays untouched.
   const overlayPath = path.join(tempDir, 'config.local.json');
   const persistedOverlay = fs.readFileSync(overlayPath, 'utf8');
-  assert.match(persistedOverlay, /\$scrypt\$/);
-  assert.equal(persistedOverlay.includes('s3cret-newpw'), false);
+  assert.match(persistedOverlay, /attemptTimeoutMs/);
   const persistedBase = fs.readFileSync(testConfig, 'utf8');
-  assert.equal(persistedBase.includes('$scrypt$'), false);
-  assert.equal(persistedBase.includes('s3cret-newpw'), false);
-  const staleLogin = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'admin123' }),
-  });
-  assert.equal(staleLogin.status, 401);
-  const freshLogin = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 's3cret-newpw' }),
-  });
-  assert.equal(freshLogin.status, 200);
-  const freshCookie = String(freshLogin.headers.get('set-cookie') || '').split(';')[0];
-  assert.match(freshCookie, /fr_session=/);
-  const freshState = await fetch(`${base}/api/state`, { headers: { Cookie: freshCookie } }).then((res) =>
-    res.json(),
-  );
-  assert.equal(freshState.webui.defaultPassword, false);
+  assert.equal(persistedBase.includes('attemptTimeoutMs": 6000'), false);
 
-  const logout = await fetch(`${base}/api/logout`, {
-    method: 'POST',
-    headers: { Cookie: freshCookie },
-  });
-  assert.equal(logout.status, 200);
-  const afterLogout = await fetch(`${base}/api/state`, { headers: { Cookie: freshCookie } });
-  assert.equal(afterLogout.status, 401);
-
-  // Restart must be last: the server exits and stops answering. Re-login
-  // first since the password change above revoked all sessions.
-  const relogin = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 's3cret-newpw' }),
-  });
-  assert.equal(relogin.status, 200);
-  const restartCookie = String(relogin.headers.get('set-cookie') || '').split(';')[0];
+  // Restart must be last: the server exits and stops answering.
   const restart = await fetch(`${base}/api/restart`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Cookie: restartCookie },
+    headers: { 'Content-Type': 'application/json' },
   });
   assert.equal(restart.status, 200);
   assert.equal((await restart.json()).ok, true);
@@ -1899,5 +2003,6 @@ try {
   await close(extraMock);
   await close(quotaMock);
   await close(geminiMock);
+  await close(multiKeyMock);
   fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
 }
