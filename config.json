@@ -63,6 +63,15 @@
         "hy3",
         "mimo-v2.5"
       ]
+    },
+    "orcarouter": {
+      "baseUrl": "https://api.orcarouter.ai/v1",
+      "keyEnv": "ORCAROUTER_API_KEY",
+      "freeModels": [
+        "orcarouter/free",
+        "deepseek/deepseek-v4-flash-free",
+        "deepseek/deepseek-v4-pro-free"
+      ]
     }
   },
   "discovery": {
@@ -99,7 +108,8 @@
         "gemini:gemini-3.8-flash",
         "gemini:gemini-3.7-flash",
         "tokenrouter:z-ai/glm-5.3-free",
-        "bai:glm-5.3-flash"
+        "bai:glm-5.3-flash",
+        "orcarouter:orcarouter/free"
       ]
     }
   },
@@ -138,6 +148,18 @@
       {
         "provider": "bai",
         "model": "glm-5.3-flash"
+      },
+      {
+        "provider": "orcarouter",
+        "model": "orcarouter/free"
+      },
+      {
+        "provider": "orcarouter",
+        "model": "deepseek/deepseek-v4-flash-free"
+      },
+      {
+        "provider": "orcarouter",
+        "model": "deepseek/deepseek-v4-pro-free"
       },
       {
         "provider": "gemini",

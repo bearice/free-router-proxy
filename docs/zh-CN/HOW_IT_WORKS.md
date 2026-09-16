@@ -282,6 +282,25 @@ OpenAI 兼容的 `/chat/completions` 端口加进来不用改代码。`providers
 }
 ```
 
+默认配置已经预置 OrcaRouter（可选，只有设置 Key 才会生效）：
+
+```json
+"orcarouter": {
+  "baseUrl": "https://api.orcarouter.ai/v1",
+  "keyEnv": "ORCAROUTER_API_KEY",
+  "freeModels": [
+    "orcarouter/free",
+    "deepseek/deepseek-v4-flash-free",
+    "deepseek/deepseek-v4-pro-free"
+  ]
+}
+```
+
+这里故意不打开目录探测：OrcaRouter 的免费 ID 会变化，对一个未列入
+免费目录的付费模型请求成功，也不能证明它是免费的。免费供给变化时，
+按 [OrcaRouter 免费模型文档](https://docs.orcarouter.ai/routing/free-models)
+更新白名单。
+
 可选字段：`keyEnv`、`baseUrlEnv`、`headers`、`chatPath`、`modelsPath`、
 `discover: false`（把带价格目录的渠道排除在发现之外）、
 `probeFreeTier: true`（让无价格目录自己探出免费模型）。

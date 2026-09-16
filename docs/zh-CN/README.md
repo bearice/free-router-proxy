@@ -33,6 +33,7 @@ cp .env.example .env
 | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | `TOKENROUTER_API_KEY` | TokenRouter |
 | `BAI_API_KEY` | [chat.b.ai](https://chat.b.ai) |
+| `ORCAROUTER_API_KEY` | [OrcaRouter](https://orcarouter.ai/) |
 
 一个 provider 需要多个 Key？设置 `OPENROUTER_API_KEYS`（或
 `OPENROUTER_API_KEY_KEYS`），逗号分隔填多个值；也可以在 Web UI 里添加
@@ -40,6 +41,12 @@ cp .env.example .env
 
 加新渠道：在 `config.json` 里加一段，或在 Web UI 里只填名字和 base URL
 添加。详见[工作原理](HOW_IT_WORKS.md)。
+
+OrcaRouter 已作为可选渠道预置。设置 `ORCAROUTER_API_KEY` 后，
+`free-best` 会加入 `orcarouter/free` 和当前文档中的 DeepSeek 免费模型。
+它使用 OpenAI 兼容地址 `https://api.orcarouter.ai/v1`；免费模型会变化，
+以 [OrcaRouter 免费模型目录](https://docs.orcarouter.ai/routing/free-models)
+为准。
 
 ## 远程访问
 

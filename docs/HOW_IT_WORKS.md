@@ -305,6 +305,26 @@ base URL); to do it by hand:
 }
 ```
 
+The default config includes OrcaRouter as an opt-in static provider:
+
+```json
+"orcarouter": {
+  "baseUrl": "https://api.orcarouter.ai/v1",
+  "keyEnv": "ORCAROUTER_API_KEY",
+  "freeModels": [
+    "orcarouter/free",
+    "deepseek/deepseek-v4-flash-free",
+    "deepseek/deepseek-v4-pro-free"
+  ]
+}
+```
+
+This intentionally does not enable catalog probing: OrcaRouter's free IDs are
+documented as a changing catalog, and a successful request to an unlisted paid
+model would not prove that it is free. Refresh the allowlist from the
+[OrcaRouter free-model documentation](https://docs.orcarouter.ai/routing/free-models)
+when its free offerings change.
+
 Optional fields: `keyEnv`, `baseUrlEnv`, `headers`, `chatPath`, `modelsPath`,
 `discover: false` to keep a priced catalog provider out of discovery, and
 `probeFreeTier: true` to let a price-free catalog contribute models by probing.
