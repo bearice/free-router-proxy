@@ -586,6 +586,16 @@ export function defaultConfigObject() {
         freeModels: [],
         keys: [],
       },
+      orcarouter: {
+        baseUrl: 'https://api.orcarouter.ai/v1',
+        keyEnv: 'ORCAROUTER_API_KEY',
+        freeModels: [
+          'orcarouter/free',
+          'deepseek/deepseek-v4-flash-free',
+          'deepseek/deepseek-v4-pro-free',
+        ],
+        keys: [],
+      },
     },
     discovery: {
       enabled: true,

@@ -62,6 +62,15 @@
       "baseUrl": "https://hashneuron.space/v1",
       "keyEnv": "HASHNEURON_API_KEY",
       "freeModels": []
+    },
+    "orcarouter": {
+      "baseUrl": "https://api.orcarouter.ai/v1",
+      "keyEnv": "ORCAROUTER_API_KEY",
+      "freeModels": [
+        "orcarouter/free",
+        "deepseek/deepseek-v4-flash-free",
+        "deepseek/deepseek-v4-pro-free"
+      ]
     }
   },
   "discovery": {

@@ -253,6 +253,21 @@ assert.equal(normalizeCatalogPayload({ weird: true }).shape, 'unknown');
   assert.equal(defaults.providers.tokenrouter.probeFreeTier, true);
 }
 
+// OrcaRouter is an opt-in static provider: its free router and documented
+// `-free` model IDs must be present without enabling paid-model probing.
+{
+  const orca = defaultConfigObject().providers.orcarouter;
+  assert.equal(orca.baseUrl, 'https://api.orcarouter.ai/v1');
+  assert.equal(orca.keyEnv, 'ORCAROUTER_API_KEY');
+  assert.deepEqual(orca.freeModels, [
+    'orcarouter/free',
+    'deepseek/deepseek-v4-flash-free',
+    'deepseek/deepseek-v4-pro-free',
+  ]);
+  assert.equal(orca.catalog, undefined);
+  assert.equal(orca.probeFreeTier, undefined);
+}
+
 // Verbatim from a live 429 for gemini-3.1-pro-preview on a free-tier key.
 const noFreeTierBody = {
   error: {

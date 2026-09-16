@@ -34,6 +34,8 @@ local-only interface follows your browser language (12 languages included).
 | `TOKENROUTER_API_KEY` | TokenRouter |
 | `BAI_API_KEY` | [chat.b.ai](https://chat.b.ai) |
 | `HASHNEURON_API_KEY` | HashNeuron (`https://hashneuron.space/v1`) |
+| `ORCAROUTER_API_KEY` | [OrcaRouter](https://orcarouter.ai/) |
+
 
 Need more than one key per provider? Set `OPENROUTER_API_KEYS` (or
 `OPENROUTER_API_KEY_KEYS`) with comma-separated values, or add named keys in
@@ -41,6 +43,13 @@ the web UI — requests rotate across them automatically.
 
 More providers: add a block in `config.json`, or add one in the web UI with
 just a name and a base URL. See [How it works](docs/HOW_IT_WORKS.md).
+
+OrcaRouter is preconfigured as an optional provider. Set `ORCAROUTER_API_KEY`
+to add its `orcarouter/free` router and the currently documented DeepSeek
+free models to `free-best`. OrcaRouter uses the OpenAI-compatible base URL
+`https://api.orcarouter.ai/v1`; its free model availability can change, so
+the provider's [free-model catalog](https://docs.orcarouter.ai/routing/free-models)
+is the source of truth.
 
 ## Remote access
 
