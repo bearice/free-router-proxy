@@ -63,6 +63,16 @@
         "hy3",
         "mimo-v2.5"
       ]
+    },
+    "hashneuron": {
+      "catalog": true,
+      "pricing": false,
+      "baseUrl": "https://hashneuron.space/v1",
+      "keyEnv": "HASHNEURON_API_KEY",
+      "freeModels": [
+        "hy3",
+        "qwen3.8-flash"
+      ]
     }
   },
   "discovery": {
@@ -98,7 +108,6 @@
       "pinnedModels": [
         "gemini:gemini-3.8-flash",
         "gemini:gemini-3.7-flash",
-        "tokenrouter:z-ai/glm-5.3-free",
         "bai:glm-5.3-flash"
       ]
     }
@@ -132,8 +141,12 @@
         "model": "gemini-3.7-flash"
       },
       {
-        "provider": "tokenrouter",
-        "model": "z-ai/glm-5.3-free"
+        "provider": "hashneuron",
+        "model": "hy3"
+      },
+      {
+        "provider": "hashneuron",
+        "model": "qwen3.8-flash"
       },
       {
         "provider": "bai",
@@ -151,8 +164,6 @@
         "provider": "bai",
         "model": "deepseek-v4-flash"
       },
-      "stealth/ox-alpha",
-      "z-ai/glm-5.2:free",
       {
         "provider": "bai",
         "model": "qwen3.8-flash"
@@ -165,19 +176,58 @@
         "provider": "bai",
         "model": "mimo-v2.5"
       },
-      "poolside/laguna-s-2.1:free",
-      "thinkingmachines/inkling:free",
-      "thinkingmachines/inkling-small:free",
-      "nvidia/nemotron-3-ultra-550b-a55b:free",
-      "poolside/laguna-xs-2.1:free",
-      "cohere/north-mini-code:free",
-      "google/gemma-4-31b-it:free",
-      "nvidia/nemotron-3.5-lightning:free",
-      "google/gemma-4-26b-a4b-it:free",
-      "nvidia/nemotron-3-super-120b-a12b:free",
-      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-      "dots-studio/dots-3-note-preview:free",
-      "liquid/lfm-2.5-2.6b:free"
+      {
+        "provider": "openrouter",
+        "model": "poolside/laguna-s-2.1:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "thinkingmachines/inkling:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "thinkingmachines/inkling-small:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "nvidia/nemotron-3-ultra-550b-a55b:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "poolside/laguna-xs-2.1:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "cohere/north-mini-code:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "google/gemma-4-31b-it:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "nvidia/nemotron-3.5-lightning:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "google/gemma-4-26b-a4b-it:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "nvidia/nemotron-3-super-120b-a12b:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "dots-studio/dots-3-note-preview:free"
+      },
+      {
+        "provider": "openrouter",
+        "model": "liquid/lfm-2.5-2.6b:free"
+      }
     ]
   }
 }

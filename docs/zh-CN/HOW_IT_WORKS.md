@@ -29,6 +29,7 @@ cp .env.example .env
 | `OPENROUTER_API_KEY` | 是，OpenRouter 兜底和模型发现都要它 | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | `TOKENROUTER_API_KEY` | 否 | 你的 TokenRouter 账号 |
 | `BAI_API_KEY` | 否 | [chat.b.ai](https://chat.b.ai) API Key，一个 Key 通所有 B.AI 官方模型 |
+| `HASHNEURON_API_KEY` | 否 | HashNeuron OpenAI 兼容网关 `https://hashneuron.space/v1` |
 | `GEMINI_API_KEY` | 否 | [Google AI Studio](https://aistudio.google.com/apikey)。免费层 Flash-Lite 是限配额的，不是无限的 |
 
 之后加的 provider 叫 `foo`，默认读 `FOO_API_KEY` 和 `FOO_BASE_URL`，除非

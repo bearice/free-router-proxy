@@ -30,6 +30,7 @@ cp .env.example .env
 | `OPENROUTER_API_KEY` | Yes, for OpenRouter fallbacks and model discovery | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | `TOKENROUTER_API_KEY` | No | Your TokenRouter account |
 | `BAI_API_KEY` | No | [chat.b.ai](https://chat.b.ai) API keys. One key covers all official B.AI models |
+| `HASHNEURON_API_KEY` | No | HashNeuron OpenAI-compatible gateway at `https://hashneuron.space/v1` |
 | `GEMINI_API_KEY` | No | [Google AI Studio](https://aistudio.google.com/apikey). Free-tier Flash-Lite is quota-limited, not unlimited |
 
 Any later provider named `foo` reads `FOO_API_KEY` and `FOO_BASE_URL` unless

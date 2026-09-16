@@ -34,6 +34,7 @@ import { displayPath, maskSecret, validateSecret } from './ui.mjs';
 import {
   addMissingKeys,
   buildLiveConfig,
+  canonicalizeRouteEntry,
   deepMerge,
   defaultConfigObject,
   providerKeysFromConfig,
@@ -385,6 +386,60 @@ assert.equal(validateSecret('sk-normal-key'), '');
   assert.equal(addMissingKeys(target, { a: 2, b: 3, nested: { x: 2, y: 4 } }), true);
   assert.deepEqual(target, { a: 1, b: 3, nested: { x: 1, y: 4 } });
   assert.equal(addMissingKeys(target, { a: 1, b: 3, nested: { x: 1, y: 4 } }), false);
+}
+
+assert.deepEqual(canonicalizeRouteEntry('poolside/laguna-s-2.1:free'), {
+  provider: 'openrouter',
+  model: 'poolside/laguna-s-2.1:free',
+});
+assert.deepEqual(canonicalizeRouteEntry('openrouter:poolside/laguna-s-2.1:free'), {
+  provider: 'openrouter',
+  model: 'poolside/laguna-s-2.1:free',
+});
+assert.deepEqual(canonicalizeRouteEntry('google/gemma-4-31b-it:free'), {
+  provider: 'openrouter',
+  model: 'google/gemma-4-31b-it:free',
+});
+assert.deepEqual(canonicalizeRouteEntry('hashneuron:hy3', 'openrouter', new Set(['openrouter', 'hashneuron'])), {
+  provider: 'hashneuron',
+  model: 'hy3',
+});
+assert.deepEqual(canonicalizeRouteEntry({ provider: 'hashneuron', model: 'hy3' }), {
+  provider: 'hashneuron',
+  model: 'hy3',
+});
+assert.equal(canonicalizeRouteEntry('tokenrouter:'), null);
+
+{
+  const live = buildLiveConfig(
+    {
+      defaultProvider: 'openrouter',
+      providers: { openrouter: {}, hashneuron: {} },
+      routes: {
+        'free-best': [
+          'poolside/laguna-s-2.1:free',
+          { provider: 'hashneuron', model: 'hy3' },
+          'hashneuron:qwen3.8-flash',
+        ],
+      },
+    },
+    {},
+  );
+  assert.deepEqual(live.routes['free-best'], [
+    { provider: 'openrouter', model: 'poolside/laguna-s-2.1:free' },
+    { provider: 'hashneuron', model: 'hy3' },
+    { provider: 'hashneuron', model: 'qwen3.8-flash' },
+  ]);
+  const overlay = {
+    _schemaVersion: SCHEMA_VERSION,
+    routes: { 'free-best': ['thinkingmachines/inkling:free', 'hashneuron:hy3'] },
+  };
+  assert.equal(runOverlayMigrations(overlay), true);
+  assert.deepEqual(overlay.routes['free-best'], [
+    { provider: 'openrouter', model: 'thinkingmachines/inkling:free' },
+    { provider: 'hashneuron', model: 'hy3' },
+  ]);
+  assert.equal(runOverlayMigrations(overlay), false);
 }
 
 assert.equal(providerNeedsThoughtSignatures({ name: 'gemini', baseUrl: 'http://127.0.0.1' }), true);

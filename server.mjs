@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildLiveConfig,
+  canonicalizeRouteEntry,
   defaultConfigPath,
   ensureConfigFile,
   isPlainObject,
@@ -379,15 +380,17 @@ function log(message, detail = undefined) {
   else console.log(prefix, message, detail);
 }
 
+function knownProviderNames() {
+  return new Set(PROVIDERS.keys());
+}
+
 function normalizeCandidate(entry) {
-  if (typeof entry === 'string') return { provider: registry.defaultProvider, model: entry };
-  if (entry && typeof entry === 'object') {
-    return {
-      provider: String(entry.provider || registry.defaultProvider),
-      model: String(entry.model || entry.id || ''),
-    };
-  }
-  return { provider: registry.defaultProvider, model: '' };
+  return (
+    canonicalizeRouteEntry(entry, registry.defaultProvider, knownProviderNames()) || {
+      provider: registry.defaultProvider,
+      model: '',
+    }
+  );
 }
 
 function candidateKey(candidate) {
@@ -2219,31 +2222,15 @@ async function handleServerConfig(req, res) {
 // ---- Editable configuration (web UI settings tabs) ----
 
 function routeEntryString(entry) {
-  if (typeof entry === 'string') {
-    const model = entry.trim();
-    return model ? `${registry.defaultProvider}:${model}` : '';
-  }
-  if (entry && typeof entry === 'object') {
-    const provider = String(entry.provider || '');
-    const model = String(entry.model || entry.id || '');
-    if (provider && model) return `${provider}:${model}`;
-    return model;
-  }
-  return '';
+  const canonical = canonicalizeRouteEntry(entry, registry.defaultProvider, knownProviderNames());
+  return canonical ? `${canonical.provider}:${canonical.model}` : '';
 }
 
-// "provider:model" -> {provider, model} when the prefix names a provider,
-// otherwise kept as a plain string (e.g. "z-ai/glm-5.2:free").
+// Accepts `{provider, model}`, `provider:model`, or a bare model id that
+// belongs to defaultProvider (including OpenRouter ids that themselves contain
+// a colon, e.g. `z-ai/glm-5.2:free`).
 function parseRouteEntryString(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return null;
-  const separator = text.indexOf(':');
-  if (separator > 0 && PROVIDERS.has(text.slice(0, separator))) {
-    const model = text.slice(separator + 1).trim();
-    if (!model) return null;
-    return { provider: text.slice(0, separator), model };
-  }
-  return text;
+  return canonicalizeRouteEntry(raw, registry.defaultProvider, knownProviderNames());
 }
 
 function editableConfigState() {
@@ -2388,7 +2375,9 @@ async function handleProviders(req, res) {
     let purged = 0;
     for (const [routeName, entries] of Object.entries(config.routes || {})) {
       if (!Array.isArray(entries)) continue;
-      const kept = entries.filter((entry) => normalizeCandidate(entry).provider !== name);
+      const kept = entries
+        .map((entry) => normalizeCandidate(entry))
+        .filter((candidate) => candidate.model && candidate.provider !== name);
       if (kept.length === entries.length) continue;
       purged += entries.length - kept.length;
       setOverlayValue(['routes', routeName], kept);
@@ -2491,21 +2480,19 @@ async function handleRoutes(req, res) {
     if (!entry) {
       return sendJson(res, 400, { error: { message: `empty model entry`, type: 'invalid_request_error' } });
     }
-    const key = typeof entry === 'string' ? `:${entry}` : `${entry.provider}:${entry.model}`;
+    const key = `${entry.provider}:${entry.model}`;
     if (seen.has(key)) continue;
     seen.add(key);
     parsed.push(entry);
-    if (typeof entry !== 'string') {
-      const provider = PROVIDERS.get(entry.provider);
-      if (!provider) {
-        return sendJson(res, 400, { error: { message: `unknown provider in entry: ${routeEntryString(entry)}`, type: 'invalid_request_error' } });
-      }
-      if (!provider.catalogHasPricing && !provider.freeModels.has(entry.model)) {
-        provider.freeModels.add(entry.model);
-        const cfg = editableProviderRaw(entry.provider);
-        cfg.freeModels = [...provider.freeModels];
-        notes.push(`added ${entry.model} to ${entry.provider} freeModels`);
-      }
+    const provider = PROVIDERS.get(entry.provider);
+    if (!provider) {
+      return sendJson(res, 400, { error: { message: `unknown provider in entry: ${routeEntryString(entry)}`, type: 'invalid_request_error' } });
+    }
+    if (!provider.catalogHasPricing && !provider.freeModels.has(entry.model)) {
+      provider.freeModels.add(entry.model);
+      const cfg = editableProviderRaw(entry.provider);
+      cfg.freeModels = [...provider.freeModels];
+      notes.push(`added ${entry.model} to ${entry.provider} freeModels`);
     }
   }
   setOverlayValue(['routes', route], parsed);
