@@ -1,0 +1,46 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/bearice/free-router-proxy
+  tag: latest
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+host: 0.0.0.0
+port: 8787
+allowRemoteUI: false
+envFromSecret: free-router-env
+
+resources: {}
+terminationGracePeriodSeconds: 30
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  storageClassName: ""
+  mountPath: /data
+  configPath: /data/config.json
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Standard Kubernetes Ingress is opt-in. The chart has no default hostname;
+# provide hosts, paths, and TLS in the consuming environment values.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+httpRoute:
+  enabled: false
+  annotations: {}
+  hostnames: []
+  parentRefs: []

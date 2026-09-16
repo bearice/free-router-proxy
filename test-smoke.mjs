@@ -1921,7 +1921,8 @@ try {
   assert.equal(saved.status, 200);
   const envBody = fs.readFileSync(envPath, 'utf8');
   assert.equal(envBody, 'BAI_API_KEY=bai-rotated-key\n');
-  assert.equal(fs.statSync(envPath).mode & 0o777, 0o600);
+  // Windows does not expose POSIX permission bits through stat().
+  if (process.platform !== 'win32') assert.equal(fs.statSync(envPath).mode & 0o777, 0o600);
   assert.equal(process.env.NODE_OPTIONS, undefined);
 
   // The new key has to apply without a restart, and the redactor has to learn

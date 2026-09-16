@@ -76,8 +76,12 @@ export function displayPath(target) {
   const home = os.homedir();
   const text = String(target || '');
   if (!home) return text;
-  if (text === home) return '~';
-  if (text.startsWith(`${home}/`)) return `~/${text.slice(home.length + 1)}`;
+  const normalizedHome = home.replaceAll('\\', '/');
+  const normalizedText = text.replaceAll('\\', '/');
+  if (normalizedText === normalizedHome) return '~';
+  if (normalizedText.startsWith(`${normalizedHome}/`)) {
+    return `~/${normalizedText.slice(normalizedHome.length + 1)}`;
+  }
   return text;
 }
 

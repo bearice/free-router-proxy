@@ -76,6 +76,11 @@ binds `0.0.0.0` so Docker port forwarding works, while Compose publishes it
 only on the host loopback address. Keys are injected at runtime from `.env`
 and never baked into the image. Weekly-discovery state is ephemeral: it lives
 inside the container and is reset on rebuild.
+To expose the service beyond the host, set `FREE_ROUTER_HOST=0.0.0.0`, publish
+the port, and explicitly set `FREE_ROUTER_ALLOW_REMOTE_UI=true`. The UI and
+gateway API have no user authentication, so use a trusted network or an
+authenticated reverse proxy. Remote browser requests still pass the
+`Sec-Fetch-Site` check, and a supplied `Origin` must match `Host`.
 
 ```bash
 docker compose ps
@@ -123,6 +128,14 @@ applies most changes immediately. Port and marked settings need a restart.
 ```
 
 Set `enabled: false` to remove `/` and `/api/*` entirely.
+
+### Remote UI guard
+
+The UI and management APIs have no user authentication and are loopback-only
+by default. `FREE_ROUTER_ALLOW_REMOTE_UI=true` opts into remote access. The
+server still rejects cross-site browser requests and requires a supplied
+`Origin` to match `Host` in remote mode; a plain `curl` call sends neither
+header and remains allowed.
 
 ### Why the key endpoints need care
 
