@@ -1,0 +1,35 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "free-router.fullname" . }}
+  labels:
+    {{- include "free-router.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range (required "ingress.hosts is required when ingress.enabled is true" .Values.ingress.hosts) }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range (required "each ingress host must define at least one path" .paths) }}
+          - path: {{ default "/" .path | quote }}
+            pathType: {{ default "Prefix" .pathType }}
+            backend:
+              service:
+                name: {{ include "free-router.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

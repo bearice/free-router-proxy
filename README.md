@@ -41,6 +41,15 @@ the web UI — requests rotate across them automatically.
 More providers: add a block in `config.json`, or add one in the web UI with
 just a name and a base URL. See [How it works](docs/HOW_IT_WORKS.md).
 
+## Remote access
+
+The service is local-only by default. To expose it on a trusted LAN or through
+an authenticated reverse proxy, set `FREE_ROUTER_HOST=0.0.0.0` and
+`FREE_ROUTER_ALLOW_REMOTE_UI=true`, then publish the port. The UI and gateway
+API do not provide user authentication, so do not expose them directly to an
+untrusted network. Remote browser requests still need an acceptable
+`Sec-Fetch-Site` value and, when present, an `Origin` matching `Host`.
+
 ## Configuration layers
 
 `config.json` holds defaults and stays merge-clean. Everything you change —

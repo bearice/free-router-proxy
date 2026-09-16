@@ -71,6 +71,10 @@ docker compose up -d
 网关在 `http://127.0.0.1:8787/v1` 可达。容器进程绑 `0.0.0.0` 只是为了
 Docker 端口转发；Compose 在宿主机上只发布到 loopback。Key 运行时从
 `.env` 注入，不会 bake 进镜像。每周发现状态在容器重建时重置。
+如需从本机以外访问，设置 `FREE_ROUTER_HOST=0.0.0.0`、发布端口，并显式设置
+`FREE_ROUTER_ALLOW_REMOTE_UI=true`。UI 和网关接口本身没有用户鉴权，应只放在
+可信网络或已有鉴权的反向代理后。远程浏览器请求仍会校验 `Sec-Fetch-Site`，带有
+`Origin` 时还必须匹配 `Host`。
 
 ```bash
 docker compose ps
@@ -118,6 +122,13 @@ npm run models -- --json
 ```
 
 设 `enabled: false` 可整个拿掉 `/` 和 `/api/*`。
+
+### 远程 UI 防护
+
+UI 和管理接口没有用户鉴权，默认只接受 loopback。设置
+`FREE_ROUTER_ALLOW_REMOTE_UI=true` 才会允许远程访问。服务仍会拒绝跨站浏览器
+请求；远程模式下，请求带 `Origin` 时必须匹配 `Host`。纯 `curl` 不带这两个头，
+仍可使用。
 
 ### 写 Key 接口为什么要小心
 

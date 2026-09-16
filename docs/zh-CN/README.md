@@ -41,6 +41,13 @@ cp .env.example .env
 加新渠道：在 `config.json` 里加一段，或在 Web UI 里只填名字和 base URL
 添加。详见[工作原理](HOW_IT_WORKS.md)。
 
+## 远程访问
+
+服务默认只接受本机访问。若要暴露到可信局域网或已经有鉴权的反向代理，
+设置 `FREE_ROUTER_HOST=0.0.0.0` 和 `FREE_ROUTER_ALLOW_REMOTE_UI=true`，再发布
+端口。UI 和网关接口本身不提供用户鉴权，不要直接暴露到不可信网络。远程浏览器
+请求仍会校验可接受的 `Sec-Fetch-Site`；请求带 `Origin` 时还必须匹配 `Host`。
+
 ## 配置分层
 
 `config.json` 只放默认值，保持可合并。你的所有改动——Web UI 里改的、

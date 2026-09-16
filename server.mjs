@@ -232,6 +232,8 @@ const USAGE_DAY_FORMATTER = (() => {
 })();
 const uiConfig = config.webui || config.ui || {};
 const UI_ENABLED = uiConfig.enabled !== false;
+const UI_ALLOW_REMOTE =
+  uiConfig.allowRemote === true || /^(?:1|true|yes|on)$/i.test(process.env.FREE_ROUTER_ALLOW_REMOTE_UI || '');
 const UI_ENV_PATH = path.resolve(path.dirname(CONFIG_PATH), uiConfig.envFile || '.env');
 let secretRedactor = config.redactSecrets === false ? null : createSecretRedactor(redactorEnv());
 
@@ -1987,15 +1989,28 @@ function isLoopbackAddress(address) {
   return plain === '::1' || plain === '127.0.0.1' || plain.startsWith('127.');
 }
 
-// The management interface has no login because it is local-only. Require a
-// loopback peer and loopback Host/Origin, and reject cross-site browser calls.
-// A plain curl call sends neither Origin nor Sec-Fetch-Site and is allowed.
-function uiGuardFailure(req) {
-  if (!isLoopbackAddress(req.socket?.remoteAddress)) return 'requests must come from loopback';
+// The management interface has no login, so it remains loopback-only by
+// default. Remote exposure is explicit opt-in; once enabled, retain the
+// Host/Origin and browser CSRF checks. A plain curl call sends neither Origin
+// nor Sec-Fetch-Site and is allowed.
+function isLocalHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  if (host === '::1' || host === '127.0.0.1' || host.startsWith('127.') || host === '[::1]') return true;
+  if (/^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(host)) return true;
+  if (/^(fc[0-9a-f]{2}|fd[0-9a-f]{2}|fe80):/i.test(host)) return true;
+  if (!host.includes('.') && /^[a-z0-9-]+$/i.test(host)) return true;
+  return false;
+}
 
+function uiGuardFailure(req) {
+  if (!UI_ALLOW_REMOTE && !isLoopbackAddress(req.socket?.remoteAddress)) {
+    return 'requests must come from loopback';
+  }
   const host = String(req.headers.host || '');
   const hostname = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-  if (hostname && hostname !== 'localhost' && !isLoopbackAddress(hostname)) {
+  if (!UI_ALLOW_REMOTE && hostname && !isLocalHost(hostname)) {
     return `unexpected Host header: ${host}`;
   }
 
@@ -2012,7 +2027,11 @@ function uiGuardFailure(req) {
     } catch {
       return `invalid Origin header: ${origin}`;
     }
-    if (originHost !== 'localhost' && !isLoopbackAddress(originHost)) {
+    if (UI_ALLOW_REMOTE) {
+      if (!hostname || originHost.toLowerCase() !== hostname.toLowerCase()) {
+        return `unexpected Origin header: ${origin}`;
+      }
+    } else if (!isLocalHost(originHost)) {
       return `unexpected Origin header: ${origin}`;
     }
   }
