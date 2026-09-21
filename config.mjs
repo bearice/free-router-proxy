@@ -458,6 +458,10 @@ export function runOverlayMigrations(overlay) {
     changed = true;
   }
   if (canonicalizeOverlayRoutes(overlay)) changed = true;
+  if (isPlainObject(overlay.discovery) && Object.prototype.hasOwnProperty.call(overlay.discovery, 'provider')) {
+    delete overlay.discovery.provider;
+    changed = true;
+  }
   return changed;
 }
 
@@ -541,7 +545,7 @@ export function defaultConfigObject() {
         modelsUrl: 'https://generativelanguage.googleapis.com/v1beta/models',
         modelsKeyHeader: 'x-goog-api-key',
         keyEnv: 'GEMINI_API_KEY',
-        freeModels: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'],
+        freeModels: [],
         keys: [],
       },
       openrouter: {
@@ -558,29 +562,33 @@ export function defaultConfigObject() {
       tokenrouter: {
         catalog: true,
         pricing: false,
+        probeFreeTier: true,
         baseUrl: 'https://api.tokenrouter.com/v1',
         keyEnv: 'TOKENROUTER_API_KEY',
-        freeModels: ['z-ai/glm-5.3-free'],
+        freeModels: [],
         keys: [],
       },
       bai: {
+        catalog: true,
+        pricing: false,
+        probeFreeTier: true,
         baseUrl: 'https://api.b.ai/v1',
         keyEnv: 'BAI_API_KEY',
-        freeModels: ['glm-5.3-flash', 'deepseek-v4-flash', 'qwen3.8-flash', 'hy3', 'mimo-v2.5'],
+        freeModels: [],
         keys: [],
       },
       hashneuron: {
         catalog: true,
         pricing: false,
+        probeFreeTier: true,
         baseUrl: 'https://hashneuron.space/v1',
         keyEnv: 'HASHNEURON_API_KEY',
-        freeModels: ['hy3', 'qwen3.8-flash'],
+        freeModels: [],
         keys: [],
       },
     },
     discovery: {
       enabled: true,
-      provider: 'openrouter',
       intervalMs: 172800000,
       route: 'free-best',
       stateFile: 'discovered-free-models.json',
@@ -608,11 +616,7 @@ export function defaultConfigObject() {
         maxPerRun: 8,
         usageWeight: 12,
         usageMinRequests: 20,
-        pinnedModels: [
-          'gemini:gemini-3.8-flash',
-          'gemini:gemini-3.7-flash',
-          'bai:glm-5.3-flash',
-        ],
+        pinnedModels: [],
       },
     },
     usage: {
@@ -634,19 +638,7 @@ export function defaultConfigObject() {
       forbidden: 3600000,
     },
     routes: {
-      'free-best': [
-        { provider: 'hashneuron', model: 'hy3' },
-        { provider: 'hashneuron', model: 'qwen3.8-flash' },
-        { provider: 'gemini', model: 'gemini-3.8-flash' },
-        { provider: 'gemini', model: 'gemini-3.7-flash' },
-        { provider: 'bai', model: 'glm-5.3-flash' },
-        { provider: 'gemini', model: 'gemini-3.5-flash-lite' },
-        { provider: 'gemini', model: 'gemini-3.1-flash-lite' },
-        { provider: 'bai', model: 'deepseek-v4-flash' },
-        { provider: 'bai', model: 'qwen3.8-flash' },
-        { provider: 'bai', model: 'hy3' },
-        { provider: 'bai', model: 'mimo-v2.5' },
-      ],
+      'free-best': [],
     },
     webui: { enabled: true, envFile: '.env' },
   };

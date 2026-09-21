@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createProviderRegistry,
   isChatModel,
+  isMarkedFree,
   normalizeCatalogPayload,
   normalizeModelSlug,
   supportsRequest,
@@ -156,6 +157,10 @@ assert.equal(googleCatalog.models[0].context_length, 1048576);
 // Declared generation methods decide chat capability; embeddings, video, and
 // live audio are excluded without naming them anywhere.
 assert.deepEqual(googleCatalog.models.map(isChatModel), [true, false, false, false]);
+assert.equal(isMarkedFree({ id: 'z-ai/glm-5.3-free' }), true);
+assert.equal(isMarkedFree({ id: 'hy3', free: true }), true);
+assert.equal(isMarkedFree({ id: 'nemotron', tags: ['free'] }), true);
+assert.equal(isMarkedFree({ id: 'xai/grok-4.6' }), false);
 // A listing with no prices must never read as free.
 assert.equal(googleCatalog.models[0].pricing, undefined);
 // And no OpenAI-style parameter list: treating that as "no tools" would skip
@@ -221,6 +226,20 @@ assert.equal(normalizeCatalogPayload({ weird: true }).shape, 'unknown');
   ]) {
     assert.equal(excluded(id), false, `should stay a candidate: ${id}`);
   }
+}
+
+{
+  const defaults = defaultConfigObject();
+  assert.deepEqual(defaults.routes['free-best'], []);
+  assert.deepEqual(defaults.providers.gemini.freeModels, []);
+  assert.deepEqual(defaults.providers.bai.freeModels, []);
+  assert.deepEqual(defaults.providers.hashneuron.freeModels, []);
+  assert.deepEqual(defaults.providers.tokenrouter.freeModels, []);
+  assert.deepEqual(defaults.discovery.evaluation.pinnedModels, []);
+  assert.equal(defaults.discovery.provider, undefined);
+  assert.equal(defaults.providers.bai.probeFreeTier, true);
+  assert.equal(defaults.providers.hashneuron.probeFreeTier, true);
+  assert.equal(defaults.providers.tokenrouter.probeFreeTier, true);
 }
 
 // Verbatim from a live 429 for gemini-3.1-pro-preview on a free-tier key.
@@ -450,6 +469,13 @@ assert.equal(canonicalizeRouteEntry('tokenrouter:'), null);
     { provider: 'hashneuron', model: 'hy3' },
   ]);
   assert.equal(runOverlayMigrations(overlay), false);
+  const staleDiscovery = {
+    _schemaVersion: SCHEMA_VERSION,
+    discovery: { enabled: true, provider: 'openrouter' },
+  };
+  assert.equal(runOverlayMigrations(staleDiscovery), true);
+  assert.equal(staleDiscovery.discovery.provider, undefined);
+  assert.equal(runOverlayMigrations(staleDiscovery), false);
 }
 
 assert.equal(providerNeedsThoughtSignatures({ name: 'gemini', baseUrl: 'http://127.0.0.1' }), true);
@@ -565,6 +591,7 @@ const mock = http.createServer(async (req, res) => {
           'mock-a',
           'mock-b',
           'mock-new',
+          'mock-dead',
           'mock-audio',
           'acme/extra-1:free',
           'mock-domain',
@@ -592,6 +619,11 @@ const mock = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (body.model === 'mock-dead') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'No endpoints found' } }));
+      return;
+    }
     const isEvaluation = body.messages?.some(
       (message) => typeof message.content === 'string' && message.content.includes('OX-RANK-7'),
     );
@@ -788,8 +820,15 @@ const extraMock = http.createServer(async (req, res) => {
       (message) => message.content === 'force-extra-failure',
     );
     if (shouldFail) {
-      res.writeHead(429, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'extra rate limited' } }));
+      // Empty 200: ranking reliability must react to a useless reply, not to
+      // a 429. Quota exhaustion is congestion, not a quality signal.
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          model: body.model,
+          choices: [{ message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+        }),
+      );
       return;
     }
     res.setHeader('Content-Type', 'application/json');
@@ -1082,7 +1121,6 @@ fs.writeFileSync(
     },
     discovery: {
       enabled: true,
-      provider: 'openrouter',
       intervalMs: 604800000,
       route: 'test-route',
       stateFile: 'discovered-free-models.json',
@@ -1177,29 +1215,44 @@ try {
   assert.equal(health.version, PACKAGE_VERSION);
   // mock-new came from the priced catalog; glm-5.3-pro came from asking bai to
   // serve a model its price-free catalog says nothing about.
-  assert.deepEqual(health.discovery.addedModels, ['mock-new', 'bai:models/glm-5.3-pro']);
+  assert.deepEqual(health.discovery.addedModels, ['openrouter:mock-new', 'bai:models/glm-5.3-pro']);
+  // Catalog $0 is not enough: a live chat probe has to return 200 unpaid.
+  assert.equal(
+    health.discovery.addedModels.includes('mock-dead'),
+    false,
+  );
+  assert.equal(
+    health.routes['test-route'].some((entry) => entry.id === 'mock-dead'),
+    false,
+  );
 
   const probeVerdicts = health.discovery.modelVerdicts;
+  assert.equal(probeVerdicts['openrouter:mock-new'].free, true);
+  assert.match(probeVerdicts['openrouter:mock-new'].reason, /probe 200 unpaid/);
+  assert.equal(probeVerdicts['openrouter:mock-dead'].free, false);
+  assert.match(probeVerdicts['openrouter:mock-dead'].reason, /HTTP 404/);
+  assert.equal(health.discovery.evaluations['mock-dead'], undefined);
   assert.equal(probeVerdicts['bai:models/glm-5.3-pro'].free, true);
-  assert.match(probeVerdicts['bai:models/glm-5.3-pro'].reason, /served a free-tier request/);
-  // Answered 429 with every free-tier limit at zero, so it never enters a route.
+  assert.match(probeVerdicts['bai:models/glm-5.3-pro'].reason, /probe 200 unpaid|served a free-tier request/);
+  // Answered 429, so it never enters a route.
   assert.equal(probeVerdicts['bai:models/glm-5.3-paid'].free, false);
+  assert.match(probeVerdicts['bai:models/glm-5.3-paid'].reason, /HTTP 429/);
   assert.equal(
     health.routes['test-route'].some((entry) => entry.id.includes('glm-5.3-paid')),
     false,
   );
   // Not a chat model, so it was filtered out before any request was spent on it.
   assert.equal(probeVerdicts['bai:models/glm-5.3-embed'], undefined);
-  // Already configured under a bare id, so the prefixed catalog entry for the
-  // same model must not be probed again or added a second time.
-  assert.equal(probeVerdicts['bai:models/glm-5.3-flash'], undefined);
+  // Configured under a bare id; the catalog spelling still gets a live probe.
+  assert.equal(probeVerdicts['bai:glm-5.3-flash'].free, true);
+  assert.match(probeVerdicts['bai:glm-5.3-flash'].reason, /probe 200 unpaid/);
   assert.equal(
     health.routes['test-route'].filter((entry) => entry.id.includes('glm-5.3-flash')).length,
     1,
   );
   // A domain-tuned model is free and chat-capable, but must not be auto-routed
   // or spend an evaluation on it.
-  assert.deepEqual(health.discovery.excludedModels, ['mock-domain']);
+  assert.deepEqual(health.discovery.excludedModels, ['openrouter:mock-domain']);
   assert.equal(health.discovery.evaluations['mock-domain'], undefined);
   assert.equal(
     health.routes['test-route'].some((entry) => entry.id === 'mock-domain'),
@@ -1229,15 +1282,14 @@ try {
   assert.equal(mockNewEvaluation.latencyScore, 6);
   assert.equal(mockNewEvaluation.score, 83);
   assert.equal(health.defaultProvider, 'openrouter');
-  assert.equal(health.discovery.provider, 'openrouter');
   assert.equal(health.providers.openrouter.kind, 'catalog');
   assert.equal(health.providers.tokenrouter.kind, 'static');
   assert.equal(health.providers.extra.configured, true);
 
-  // Only a provider that publishes prices may contribute new models; the others
-  // consult their catalog purely to notice withdrawals.
-  assert.deepEqual(health.discovery.addsFrom, ['openrouter']);
-  assert.deepEqual(health.discovery.availabilityOnly, ['bai', 'extra']);
+  // Priced catalogs and probeFreeTier catalogs both add models; extra has a
+  // catalog only so it can notice withdrawals.
+  assert.deepEqual(health.discovery.addsFrom, ['openrouter', 'bai']);
+  assert.deepEqual(health.discovery.availabilityOnly, ['extra']);
   assert.equal(health.providers.bai.kind, 'static+catalog');
 
   // glm-5.3-flash is listed upstream as "models/glm-5.3-flash": a spelling
@@ -1263,12 +1315,12 @@ try {
     true,
   );
   assert.ok(health.providers.extra.catalogError);
-  assert.deepEqual(health.discovery.removedModels, ['mock-b']);
+  assert.deepEqual(health.discovery.removedModels, ['openrouter:mock-b', 'bai:glm-withdrawn']);
   assert.equal(health.discovery.evaluations['mock-new'].status, 'scored');
   assert.equal(
     JSON.parse(fs.readFileSync(path.join(tempDir, 'discovered-free-models.json'), 'utf8'))
       .addedModels[0],
-    'mock-new',
+    'openrouter:mock-new',
   );
   const modelsResponse = await fetch(`http://127.0.0.1:${routerPort}/v1/models`);
   assert.equal(modelsResponse.status, 200);
@@ -1645,8 +1697,6 @@ try {
     [...usageByKey.keys()].sort(),
     [
       'bai:glm-5.3-flash',
-      // A probe spends a real request, so it is counted like any other.
-      'bai:models/glm-5.3-paid',
       'bai:models/glm-5.3-pro',
       'cooldownmulti:multi-model',
       'extra:extra-1',
@@ -1666,14 +1716,14 @@ try {
   assert.equal(usageByKey.get('bai:glm-5.3-flash').fail, 0);
   assert.equal(usageByKey.get('tokenrouter:z-ai/glm-5.3-free').ok, 1);
   assert.equal(usageByKey.get('tokenrouter:z-ai/glm-5.3-free').counts.rateLimit, 2);
-  assert.equal(usageByKey.get('extra:extra-1').counts.rateLimit, 1);
+  assert.equal(usageByKey.get('extra:extra-1').counts.empty, 1);
   assert.equal(usageByKey.get('gemini:gemini-3.8-flash').ok, 5);
   assert.equal(usageByKey.get('gemini:gemini-3.8-flash').fail, 1);
   assert.equal(usageByKey.has('gemini:gemini-3.7-flash'), false);
   // Existing routing plus five successful multi-key requests.
   assert.equal(usage.days[0].ok, 19);
   // Existing failures plus one retired key and one per-key quota cooldown.
-  assert.equal(usage.days[0].fail, 9);
+  assert.equal(usage.days[0].fail, 8);
   assert.equal(usage.days[0].topModel.key, 'gemini:gemini-3.8-flash');
 
   // A daily limit only counts attempts the provider actually served, so the
@@ -1697,8 +1747,8 @@ try {
   const routeByKey = new Map(
     usageHealth.routes['test-route'].map((entry) => [`${entry.provider}:${entry.id}`, entry]),
   );
-  // extra:extra-1 served 1 of 2 attempts, so reliability drags its score down
-  // by the full clamped weight.
+  // extra:extra-1 served 1 useful reply and 1 empty, so reliability drags its
+  // score down by the full clamped weight. A 429 would not.
   const extraEntry = routeByKey.get('extra:extra-1');
   assert.equal(extraEntry.baseScore, 82);
   assert.equal(extraEntry.scoreAdjustment, -12);
@@ -2070,4 +2120,141 @@ try {
   await close(geminiMock);
   await close(multiKeyMock);
   fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+}
+
+{
+  const adoptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'free-router-adopt-'));
+  const catalog = http.createServer((req, res) => {
+    if (req.method === 'GET' && String(req.url || '').startsWith('/v1beta/models')) {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          models: [
+            {
+              name: 'models/kept-flash',
+              displayName: 'Kept Flash',
+              supportedGenerationMethods: ['generateContent'],
+            },
+            {
+              name: 'models/paid-flash',
+              displayName: 'Paid Flash',
+              supportedGenerationMethods: ['generateContent'],
+            },
+            {
+              name: 'models/embed-only',
+              supportedGenerationMethods: ['embedContent'],
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await listen(catalog);
+  const catalogPort = catalog.address().port;
+  const portHolder = http.createServer();
+  await listen(portHolder);
+  const adoptPort = portHolder.address().port;
+  await close(portHolder);
+  const adoptConfig = path.join(adoptDir, 'config.json');
+  fs.writeFileSync(
+    adoptConfig,
+    JSON.stringify({
+      host: '127.0.0.1',
+      port: adoptPort,
+      webui: { enabled: false },
+      defaultProvider: 'gemini',
+      providers: {
+        gemini: {
+          catalog: true,
+          pricing: false,
+          probeFreeTier: true,
+          baseUrl: `http://127.0.0.1:${catalogPort}/v1beta/openai`,
+          modelsUrl: `http://127.0.0.1:${catalogPort}/v1beta/models`,
+          modelsKeyHeader: 'x-goog-api-key',
+          keyEnv: 'GEMINI_API_KEY',
+          freeModels: [],
+        },
+      },
+      discovery: {
+        enabled: true,
+        intervalMs: 604800000,
+        route: 'free-best',
+        stateFile: 'discovered-free-models.json',
+        evaluation: { enabled: false, pinnedModels: [] },
+      },
+      routes: { 'free-best': [] },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(adoptDir, 'discovered-free-models.json'),
+    JSON.stringify({
+      lastCheckedAt: new Date().toISOString(),
+      addedModels: [],
+      modelVerdicts: {
+        'gemini:kept-flash': {
+          free: true,
+          reason: 'prior probe',
+          observedAt: new Date().toISOString(),
+        },
+        'gemini:paid-flash': {
+          free: false,
+          reason: 'no free-tier allowance (limit 0)',
+          observedAt: new Date().toISOString(),
+        },
+      },
+    }),
+  );
+  const adoptChild = spawn(process.execPath, [path.join(HERE, 'server.mjs')], {
+    env: {
+      ...process.env,
+      GEMINI_API_KEY: 'adopt-test-key',
+      FREE_ROUTER_CONFIG: adoptConfig,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let adoptOut = '';
+  adoptChild.stdout.on('data', (chunk) => {
+    adoptOut += chunk;
+  });
+  adoptChild.stderr.on('data', (chunk) => {
+    adoptOut += chunk;
+  });
+  try {
+    let health = null;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${adoptPort}/health`);
+        if (response.ok) {
+          health = await response.json();
+          if (health.discovery?.addedModels?.includes('gemini:kept-flash')) break;
+        }
+      } catch {
+        // Still starting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(health, `adopt test router did not start\n${adoptOut}`);
+    assert.deepEqual(health.discovery.addedModels, ['gemini:kept-flash']);
+    assert.deepEqual(
+      (health.routes['free-best'] || []).map((entry) => `${entry.provider}:${entry.id}`),
+      ['gemini:kept-flash'],
+    );
+  } finally {
+    adoptChild.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (adoptChild.exitCode !== null || adoptChild.signalCode !== null) return resolve();
+      const timer = setTimeout(() => {
+        adoptChild.kill('SIGKILL');
+        resolve();
+      }, 3000);
+      adoptChild.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await close(catalog);
+    fs.rmSync(adoptDir, { recursive: true, force: true, maxRetries: 3 });
+  }
 }

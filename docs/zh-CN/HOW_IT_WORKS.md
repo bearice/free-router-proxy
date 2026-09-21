@@ -257,8 +257,8 @@ OpenAI 兼容的 `/chat/completions` 端口加进来不用改代码。`providers
 
 1. 加一个 provider 对象。有 `GET /models` 就 `"catalog": true`；返回体
    带逐 token 价格才加 `"pricing": true`，否则 `freeModels` 当白名单（见下）。
-2. 把 `{ "provider": "<name>", "model": "<id>" }` 插进 `routes.free-best`
-   想排的位置。裸字符串归 `defaultProvider`。
+2. 可选：只有要手动排名时才把 `{ "provider": "<name>", "model": "<id>" }`
+   插进 `routes.free-best`。发现会自己填排名。裸字符串归 `defaultProvider`。
 3. 可选：`discovery.evaluation.pinnedModels` 里 `name:model` 置顶。
 4. `.env` 或 `~/.hermes/.env` 里设 `<NAME>_API_KEY`；URL 不一样用
    `<NAME>_BASE_URL` 覆盖。
@@ -292,11 +292,12 @@ OpenAI 兼容的 `/chat/completions` 端口加进来不用改代码。`providers
 | `static+catalog` | `catalog: true, pricing: false` | `freeModels`，外加实际能免费服务的 | 只管减；`probeFreeTier` 开了也能加 |
 | `static` | 都不设 | `freeModels` | 无 |
 
-只有 OpenRouter 公布价格，所以只有它能光看目录加新模型。Gemini 和
-TokenRouter 的 `/models` 没有 `pricing` 字段，免费收费混在一起，按列表
-自动加可能把流量引到计费模型上。但它们的目录照样拉，有两个用：掉线
-了的 `freeModels` 条目会被拿掉，以及给探活（下面）提供候选。下架的模型
-一回来就自动恢复。
+只有 OpenRouter 公布价格，所以只有它能光看目录 `$0` 加新模型。Gemini、
+TokenRouter、B.AI、HashNeuron 没有价格。开了 `probeFreeTier` 照样能贡献：
+OpenAI 兼容目录走和 OpenRouter 一样的极小现场探测；Gemini 原生列表走
+配额形 429 的评测探测。默认 `routes.free-best`、`freeModels`、
+`pinnedModels` 都是空的，排名里只有发现留下来的模型。已经判定免费的
+目录条目仍会收进排名，所以清空配置不会丢掉证过的模型。
 
 目录拉失败、返回空、或者渠道没 Key，都不改变现状：`freeModels` 照旧
 说了算。删条目必须看到一份**真正拉到的**目录，上游一抖不会清空路由。
@@ -309,8 +310,15 @@ TokenRouter 的 `/models` 没有 `pricing` 字段，免费收费混在一起，�
 
 ## 免费模型发现
 
-路由器每 `discovery.intervalMs`（当前每 2 天）扫一遍开了 `discover` 的
-目录渠道，看有没有新的免费文本模型。每个新模型得一次缓存的混合评测：
+路由器每 `discovery.intervalMs`（当前每 2 天）扫一遍**能加模型**的目录
+渠道（`pricing: true` 或 `probeFreeTier: true`），看有没有新的免费文本
+模型。目录标价 `$0` 不等于能打：剩下的
+聊天 id 再发一次极小补全（`hi`，`max_tokens: 4`，12 秒超时，每批 8 个）。
+只保留 HTTP 200 且响应里没有扣费字段的模型。若探测全部超时或连不上，
+保留上一份名单，不清空。探测失败会记下“不免费”，配置里写了也会跳过。
+探测请求不计用量。
+
+每个留下的模型再做一次缓存的混合评测：
 确定性推理/指令题、延迟、上下文长度、工具和结构化输出支持，分数决定
 它插进 `free-best` 的位置。
 
@@ -327,9 +335,11 @@ TokenRouter 的 `/models` 没有 `pricing` 字段，免费收费混在一起，�
 跟踪名单里，再也不会被当新模型看。每轮最多评 `evaluation.maxPerRun` 个。
 
 排名还会跟着真实流量走。单个模型在用量窗口攒够
-`evaluation.usageMinRequests` 次尝试后，成功率按
+`evaluation.usageMinRequests` 次**质量**尝试（成功、空回复、超时、
+`other`，不含 429/5xx/鉴权/中止）后，成功率按
 `evaluation.usageWeight` 上下调分：100% 加满，80% 不动，60% 及以下扣
-满。置顶模型豁免。同一模型多家提供时按最好的一家排名，一家拉胯不连累
+满。额度打满和上游拥堵是路由换下一家的理由，不能把接流量的模型埋到
+后面。置顶模型豁免。同一模型多家提供时按最好的一家排名，一家拉胯不连累
 模型。`./models.sh` 的 `rank+-` 列看当前偏移，`/health` 里每条有
 `baseScore` 和 `scoreAdjustment`。
 
@@ -395,8 +405,9 @@ provider 让等的 `retryDelay`。
 ID 找。发现的和配置的都管，优先于评测分，适合埋掉那些自动打分虚高的
 模型。
 
-catalog 模型变付费、下架、不再符合文本聊天，下一轮目录检查自动移出所
-有效路由。它留在 `config.json` 里当排名历史，目录哪天又标免费就恢复。
+catalog 模型变付费、下架、不再符合文本聊天、或现场探测打不通，下一轮
+目录检查自动移出有效路由。它留在 `config.json` 里当排名历史，下次探测
+成功才恢复。
 
 `static` 渠道的候选，有 `freeModels` 又有 Key 就一直在；`static+catalog`
 的还得出现在拉到的目录里，不在的进 `discovery.unavailableModels` 报备。
@@ -409,7 +420,6 @@ gitignored 的。
 ```json
 "discovery": {
   "enabled": true,
-  "provider": "openrouter",
   "intervalMs": 172800000,
   "route": "free-best",
   "stateFile": "discovered-free-models.json",
@@ -425,20 +435,19 @@ gitignored 的。
     "maxPerRun": 8,
     "usageWeight": 12,
     "usageMinRequests": 20,
-    "pinnedModels": [
-      "gemini:gemini-3.8-flash",
-      "gemini:gemini-3.7-flash",
-      "tokenrouter:z-ai/glm-5.3-free",
-      "bai:glm-5.3-flash"
-    ]
+    "pinnedModels": []
   }
 }
 ```
 
+发现写入的 id 一律是 `渠道:模型`。`/health` 的 `discovery.addsFrom` 列出
+能贡献新模型的渠道。
+
 `/health` 报上次收集时间、见过的免费模型、分数、路由优先级、以及因为
 不免费被拿掉的模型。现路由位置当 baseline 锚，从 94 起每位减 4，地板 30。
 
-评测请求和普通请求一样计用量，因为烧的是同一份 provider 配额。
+评测请求和普通请求一样计用量，因为烧的是同一份 provider 配额。现场探
+测那次极小补全不计用量。
 
 ## 请求历史和每日配额
 
@@ -499,10 +508,10 @@ journalctl --user -u free-router-proxy -f
    OpenRouter 后出的 Google/B.AI 同款免费版会紧跟原版试，而不是另起一行。
 3. 一把可用 Key 都没有的渠道跳过。
 4. catalog 渠道每 15 分钟刷新。
-5. 每 `discovery.intervalMs` 收集新免费目录文本模型、评测、按分插进
+5. 每 `discovery.intervalMs` 收集新免费目录文本模型、现场探测、评测留下的、按分插进
    `free-best`。目录里撞见已在排名的模型，挂到那条下当多渠道，不当新
    模型评。
-6. 变付费、下架、不再符合文本聊天的目录模型，移出有效路由。
+6. 变付费、下架、不再符合文本聊天、或免费聊天探测失败的目录模型，移出有效路由。
 7. 缺请求要的能力（工具、图片输入等）的模型去掉。
 8. 剩下按统一顺序试。
 9. 限流、超时、服务端错、空成功回复走 provider/model/Key 三级冷却；
