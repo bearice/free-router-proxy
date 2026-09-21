@@ -614,8 +614,6 @@ export function defaultConfigObject() {
         enabled: true,
         maxTokens: 4000,
         maxPerRun: 8,
-        usageWeight: 12,
-        usageMinRequests: 20,
         pinnedModels: [],
       },
     },

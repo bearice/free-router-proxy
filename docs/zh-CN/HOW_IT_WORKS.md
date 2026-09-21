@@ -318,30 +318,23 @@ OpenAI 兼容目录走和 OpenRouter 一样的极小现场探测；Gemini 原生
 保留上一份名单，不清空。探测失败会记下“不免费”，配置里写了也会跳过。
 探测请求不计用量。
 
-每个留下的模型再做一次缓存的混合评测：
-确定性推理/指令题、延迟、上下文长度、工具和结构化输出支持，分数决定
-它插进 `free-best` 的位置。
+排名用 `swe-bench.json` 里公布的 SWE-bench Verified 百分比（从
+[humantonylee/free-router](https://github.com/humantonylee/free-router)
+抄的 Artificial Analysis 数字，另补了那份表对不上当前免费名单的模型（Gemini 3.x Flash、Qwen3.8-27B、
+Nemotron Ultra/Lightning 等），来自 Vals 托管的 SWE-bench；不是 SWE-bench 官方 dump）。匹配方式跟那份
+目录一样：精确 id、派生 slug，再前缀匹配拼写变体（`glm-5.2` → `glm5`）。
+延迟、用量、目录元数据、本地测验都不进排名。请求时照样会切到下一台能打
+通的模型。
 
-分数三部分封顶，单项带不动全局：
+表里没有的模型仍留在路由里，排在有 SWE 分的后面，分数 `-1`、来源
+`unranked`。置顶仍然最前。路由里保存了条目时，按保存顺序先于其余发现
+的模型。`evaluation.baselineScores` 仍可手改覆盖。
+本地 10 题测验还是会记在 `discovery.evaluations` 里当诊断，但不决定
+`free-best` 顺序。
 
-| 部分 | 上限 | 说明 |
-|---|---|---|
-| benchmark | 65 | 10 道确定性题，最难 3 道占 28 分 |
-| metadata | 20 | 工具、结构化输出、上下文长度、模态、新鲜度 |
-| latency | 6 | 一次冷采样，故意只做小权重平局裁决 |
-
-分数缺失、还是 `pending`、或是老 benchmark 版本产的，都会重评。不然
-单次评测撞上 429 的模型会永远背着 `-1` 的 fallback 分垫底——它已经在
-跟踪名单里，再也不会被当新模型看。每轮最多评 `evaluation.maxPerRun` 个。
-
-排名还会跟着真实流量走。单个模型在用量窗口攒够
-`evaluation.usageMinRequests` 次**质量**尝试（成功、空回复、超时、
-`other`，不含 429/5xx/鉴权/中止）后，成功率按
-`evaluation.usageWeight` 上下调分：100% 加满，80% 不动，60% 及以下扣
-满。额度打满和上游拥堵是路由换下一家的理由，不能把接流量的模型埋到
-后面。置顶模型豁免。同一模型多家提供时按最好的一家排名，一家拉胯不连累
-模型。`./models.sh` 的 `rank+-` 列看当前偏移，`/health` 里每条有
-`baseScore` 和 `scoreAdjustment`。
+`./models.sh` 的 `SWE` 列是这个百分比。`/health` 每条有 `score`、
+`baseScore`、`scoreSource`（`swe-bench` / `unranked` / `baseline` /
+`pinned`）。
 
 ### 问渠道什么免费
 
@@ -350,7 +343,7 @@ OpenAI 兼容目录走和 OpenRouter 一样的极小现场探测；Gemini 原生
 
 | 回复 | 含义 | 效果 |
 |---|---|---|
-| `200` | 这把 Key 能 serve | 免费；带评测分进路由 |
+| `200` | 这把 Key 能 serve | 免费；留在路由 |
 | `429`，免费配额全 `limit: 0` | 根本没有免费档 | 移出路由 |
 | `429`，有 `limit` 大于 `0` | 免费，但今天花完了 | 留下；数字变每日限额 |
 | `404` | 不接，或下架了 | 移出路由 |
@@ -402,8 +395,7 @@ provider 让等的 `retryDelay`。
 集。`/health` 在 `discovery.excludedModels` 里列当前命中。
 
 `evaluation.baselineScores` 直接覆盖分数，按 `provider:model` 或裸模型
-ID 找。发现的和配置的都管，优先于评测分，适合埋掉那些自动打分虚高的
-模型。
+ID 找。发现的和配置的都管，优先于 SWE 查找表。
 
 catalog 模型变付费、下架、不再符合文本聊天、或现场探测打不通，下一轮
 目录检查自动移出有效路由。它留在 `config.json` 里当排名历史，下次探测
@@ -433,8 +425,6 @@ gitignored 的。
     "enabled": true,
     "maxTokens": 4000,
     "maxPerRun": 8,
-    "usageWeight": 12,
-    "usageMinRequests": 20,
     "pinnedModels": []
   }
 }
@@ -443,8 +433,8 @@ gitignored 的。
 发现写入的 id 一律是 `渠道:模型`。`/health` 的 `discovery.addsFrom` 列出
 能贡献新模型的渠道。
 
-`/health` 报上次收集时间、见过的免费模型、分数、路由优先级、以及因为
-不免费被拿掉的模型。现路由位置当 baseline 锚，从 94 起每位减 4，地板 30。
+`/health` 报上次收集时间、见过的免费模型、SWE 分数、路由优先级、以及因为
+不免费被拿掉的模型。
 
 评测请求和普通请求一样计用量，因为烧的是同一份 provider 配额。现场探
 测那次极小补全不计用量。
@@ -501,16 +491,17 @@ journalctl --user -u free-router-proxy -f
 
 ## 路由行为
 
-1. `free-best` 里按**模型**排名。置顶按配置顺序打头，其余跟 baseline
-   和发现分数；同一 `provider:model` 各自成组排名。
+1. `free-best` 里按**模型**排名。置顶按配置顺序打头；路由里已保存的条目
+   按保存顺序接着排；其余发现的模型按非官方 SWE-bench Verified 百分比。
+   保存名单为空时，整表都是发现排名。同一 `provider:model` 各自成组排名。
 2. 每个模型，把当前标免费文本聊天的每家都试一遍。配置的渠道先行，
    同 slug 别家跟上。目录 ID 先剥 org 前缀和 `:free` 尾巴再比对，所以
    OpenRouter 后出的 Google/B.AI 同款免费版会紧跟原版试，而不是另起一行。
 3. 一把可用 Key 都没有的渠道跳过。
 4. catalog 渠道每 15 分钟刷新。
-5. 每 `discovery.intervalMs` 收集新免费目录文本模型、现场探测、评测留下的、按分插进
+5. 每 `discovery.intervalMs` 收集新免费目录文本模型、现场探测、按 SWE 分插进
    `free-best`。目录里撞见已在排名的模型，挂到那条下当多渠道，不当新
-   模型评。
+   模型。
 6. 变付费、下架、不再符合文本聊天、或免费聊天探测失败的目录模型，移出有效路由。
 7. 缺请求要的能力（工具、图片输入等）的模型去掉。
 8. 剩下按统一顺序试。

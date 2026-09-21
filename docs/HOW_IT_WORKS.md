@@ -348,36 +348,26 @@ probe times out or cannot connect, the previous list is left alone instead of
 being wiped. Failed probes mark the model not-free so even a configured entry
 is skipped. Probe calls are not counted in usage.
 
-Each kept model then receives one cached hybrid evaluation
-using deterministic reasoning/instruction checks, response latency, context
-size, and tool/structured output support. Its score places it among the
-manually ranked models in `free-best`.
+Ranking uses published SWE-bench Verified percentages from `swe-bench.json`
+(unofficial copy of the Artificial Analysis numbers stored by
+[humantonylee/free-router](https://github.com/humantonylee/free-router),
+plus Gemini 3.x Flash, Qwen3.8-27B, Nemotron Ultra/Lightning, and other
+live free-route models filled from the Vals-hosted SWE-bench table that copy
+did not include).
+Matching follows that catalog: exact id, derived slug, then a prefix match
+for spelling variants such as `glm-5.2` → `glm5`. Latency, usage, catalog
+metadata, and the local puzzle are not part of the rank. Failover still
+tries the next reachable model at request time.
 
-Scores are made of three parts, capped so no single part can dominate:
+Models with no SWE match stay on the route after the scored ones, in
+discovery order, with score `-1` / source `unranked`. Pins still go first.
+A non-empty saved route list is a manual order and is tried before the
+remaining discovered models. `evaluation.baselineScores` remains a numeric
+override.
 
-| Part | Max | Notes |
-|---|---|---|
-| benchmark | 65 | 10 deterministic items; the 3 hardest carry 28 points |
-| metadata | 20 | tools, structured output, context length, modality, recency |
-| latency | 6 | one cold sample, so deliberately a small tiebreaker |
-
-A model is re-evaluated when its stored score is missing, still `pending`, or
-was produced by an older benchmark version. Without this, a model whose single
-evaluation attempt hit a 429 would keep the fallback score of `-1` and stay
-last forever, because it was already tracked and so never looked like a new
-discovery again. At most `evaluation.maxPerRun` models are evaluated per run.
-
-Ranking also reacts to real traffic. Once a model has at least
-`evaluation.usageMinRequests` recorded *quality* attempts (ok, empty, timeout,
-`other` — not 429/5xx/auth/abort) in the usage window, that success rate shifts
-its score by up to `evaluation.usageWeight` points: 100% success adds the full
-weight, 80% is neutral, 60% or worse subtracts the full weight. Quota exhaustion
-and upstream congestion are why the router fails over; they must not bury the
-model that absorbed the traffic. Pinned models are exempt. When one model is
-offered by several providers, the group is ranked by its best provider, so one
-bad provider does not sink the model. `./models.sh` shows the current shift in
-the `rank+-` column, and `/health` reports `baseScore` and `scoreAdjustment`
-per entry.
+`./models.sh` shows the SWE percentage in the `SWE` column. `/health`
+reports `score`, `baseScore`, and `scoreSource` (`swe-bench`, `unranked`,
+`baseline`, or `pinned`).
 
 ### Asking a provider what is free
 
@@ -387,7 +377,7 @@ real request and the reply is read as the answer:
 
 | Reply | Meaning | Effect |
 |---|---|---|
-| `200` | served on this key | free; enters the route with its evaluation score |
+| `200` | served on this key | free; stays on the route |
 | `429`, every free-tier `limit: 0` | no free allowance exists | dropped from routes |
 | `429`, some `limit` above `0` | free, but spent for now | kept; the number becomes its daily limit |
 | `404` | not served, or withdrawn | dropped from routes |
@@ -451,8 +441,7 @@ pattern takes effect on restart instead of after the next collection.
 
 `evaluation.baselineScores` overrides a score outright, keyed by
 `provider:model` or by the bare model ID. It applies to discovered models as
-well as configured ones, and takes precedence over the evaluation score, so it
-is the way to bury a model whose automatic score you do not trust.
+well as configured ones, and takes precedence over the SWE lookup.
 
 If a routed catalog model becomes paid, disappears, stops qualifying as a
 text chat model, or fails the live chat probe, the next catalog check removes
@@ -485,8 +474,6 @@ Configure the schedule and destination route in `config.json`:
     "enabled": true,
     "maxTokens": 4000,
     "maxPerRun": 8,
-    "usageWeight": 12,
-    "usageMinRequests": 20,
     "pinnedModels": []
   }
 }
@@ -495,10 +482,8 @@ Configure the schedule and destination route in `config.json`:
 Discovered ids are always `provider:model`. `/health` `discovery.addsFrom`
 lists every provider that can contribute new models.
 
-`/health` reports the last collection time, free models seen, scores, route
-priority, and models removed because they are no longer free. Existing route
-positions act as baseline score anchors, decreasing by 4 per position from 94
-down to a floor of 30.
+`/health` reports the last collection time, free models seen, SWE scores, route
+priority, and models removed because they are no longer free.
 
 Evaluation requests are counted in the usage statistics like any other request,
 because they consume the same provider quota. The tiny live-reachability probes
@@ -562,7 +547,9 @@ journalctl --user -u free-router-proxy -f
 ## Routing behavior
 
 1. Ranks **models** from `free-best`. Pinned models stay first, in config
-   order; the rest follow baseline rank and discovery scores.
+   order. If the route has saved entries, those come next in that order.
+   Remaining discovered models sort by unofficial SWE-bench Verified
+   percentage. An empty saved list is discovery ranking only.
 2. At each model, tries every provider that currently lists it as a free
    text-chat model. The configured provider is first; other listings for the
    same slug follow. Catalog IDs are matched after stripping an org prefix
@@ -571,9 +558,9 @@ journalctl --user -u free-router-proxy -f
    separate rank.
 3. Skips a provider when none of its API keys is usable.
 4. Refreshes catalog providers every 15 minutes.
-5. Collects newly free catalog text models every `discovery.intervalMs`, live-probes them, evaluates keepers, and inserts them
-   into `free-best` by score. A catalog listing of a model that is already
-   ranked is attached to that model instead of being evaluated as a new one.
+5. Collects newly free catalog text models every `discovery.intervalMs`, live-probes them, and inserts keepers
+   into `free-best` by SWE-bench score. A catalog listing of a model that is already
+   ranked is attached to that model instead of being treated as a new one.
 6. Removes catalog models that are no longer free, available, text-chat compatible, or reachable on a free chat probe
    from effective routes.
 7. Removes models missing capabilities required by the request, such as tools

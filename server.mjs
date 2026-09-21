@@ -199,8 +199,6 @@ const EVALUATION_MAX_TOKENS = Number(evaluationConfig.maxTokens || 4000);
 // older scale get recomputed instead of being compared against new ones.
 const EVALUATION_VERSION = 2;
 const EVALUATION_MAX_PER_RUN = Math.max(1, Number(evaluationConfig.maxPerRun || 8));
-const RANK_USAGE_WEIGHT = Math.max(0, Number(evaluationConfig.usageWeight ?? 12));
-const RANK_USAGE_MIN_REQUESTS = Math.max(1, Number(evaluationConfig.usageMinRequests || 20));
 const PINNED_MODELS = new Set(evaluationConfig.pinnedModels || []);
 const SWE_BENCH_SCORES = loadSweBenchScores(path.join(HERE, 'swe-bench.json'));
 const DISCOVERY_PROBE_TIMEOUT_MS = Math.max(1000, Number(discoveryConfig.probeTimeoutMs || 12000));
@@ -222,15 +220,6 @@ const USAGE_KINDS = [
 ];
 // A rejected request never reaches the model, so it does not burn daily quota.
 const USAGE_NON_CONSUMING = new Set(['rateLimit', 'notFound', 'forbidden']);
-// Congestion and auth rejects are not a quality signal. Counting them buried
-// the default model — the one that actually absorbed traffic and 429/503s.
-const RANK_USAGE_IGNORE = new Set([
-  'rateLimit',
-  'serverError',
-  'notFound',
-  'forbidden',
-  'aborted',
-]);
 const USAGE_DAY_FORMATTER = (() => {
   if (!USAGE_TIMEZONE) return null;
   try {
@@ -428,6 +417,7 @@ function verdictFor(key) {
   const verdict = modelVerdicts[key];
   if (!verdict) return null;
   if (verdict.free !== false) return verdict;
+  if (probeFailureIsInconclusive(verdict.reason, key)) return null;
   const age = Date.now() - Date.parse(verdict.observedAt || 0);
   return Number.isFinite(age) && age > VERDICT_RETRY_MS ? null : verdict;
 }
@@ -774,78 +764,47 @@ function explicitScore(key) {
   return Number.isFinite(explicit) ? explicit : null;
 }
 
-function configuredScore(id, configuredIndex) {
-  const explicit = explicitScore(id);
-  if (explicit !== null) return explicit;
-  return Math.max(30, 94 - Math.max(0, configuredIndex - 1) * 4);
+function modelIdFromKey(key) {
+  return String(key).includes(':') ? key.slice(key.indexOf(':') + 1) : key;
 }
 
-// Observed reliability nudges a model up or down once it has served enough
-// traffic to be more trustworthy than a single one-shot evaluation.
-// Only empty replies, timeouts, and unclassified errors count: quota 429s and
-// upstream 5xx are why the router falls over, not why a model should rank last.
-function usageAdjustment(key) {
-  if (!RANK_USAGE_WEIGHT) return 0;
-  const counts = {};
-  for (const day of usageDays()) mergeUsage(counts, usageByDay[day]?.[key]);
-  let ok = 0;
-  let fail = 0;
-  for (const [kind, raw] of Object.entries(counts)) {
-    const amount = Number(raw) || 0;
-    if (amount <= 0) continue;
-    if (kind === 'ok') ok += amount;
-    else if (!RANK_USAGE_IGNORE.has(kind)) fail += amount;
-  }
-  const attempts = ok + fail;
-  if (attempts < RANK_USAGE_MIN_REQUESTS) return 0;
-  const successRate = ok / attempts;
-  const scaled = ((successRate - 0.8) / 0.2) * RANK_USAGE_WEIGHT;
-  const clamped = Math.max(-RANK_USAGE_WEIGHT, Math.min(RANK_USAGE_WEIGHT, scaled));
-  return Math.round(clamped * 10) / 10;
-}
-
-function baseModelScore(key, configured, configuredIndex) {
-  const slug = keySlug(key);
-  const modelId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : key;
-  if (PINNED_MODELS.has(key) || PINNED_MODELS.has(modelId)) return Number.POSITIVE_INFINITY;
-  if (configured.has(key)) return configuredScore(key, configuredIndex.get(key));
-  for (const [configuredKey, index] of configuredIndex) {
-    if (keySlug(configuredKey) === slug) return configuredScore(configuredKey, index);
-  }
+function capabilityScore(key) {
   const explicit = explicitScore(key);
   if (explicit !== null) return explicit;
-  const evaluated = Number(modelEvaluations[modelId]?.score);
-  if (Number.isFinite(evaluated)) return evaluated;
-  const swe = sweBenchScoreFor(SWE_BENCH_SCORES, modelId);
+  const swe = sweBenchScoreFor(SWE_BENCH_SCORES, modelIdFromKey(key));
   return swe !== null ? swe : -1;
 }
 
-function rankedModelScore(key, configured, configuredIndex) {
-  const base = baseModelScore(key, configured, configuredIndex);
-  if (!Number.isFinite(base) || base < 0) return base;
-  return Math.round((base + usageAdjustment(key)) * 10) / 10;
+function baseModelScore(key) {
+  const modelId = modelIdFromKey(key);
+  if (PINNED_MODELS.has(key) || PINNED_MODELS.has(modelId)) return Number.POSITIVE_INFINITY;
+  return capabilityScore(key);
+}
+
+function rankedModelScore(key) {
+  return baseModelScore(key);
 }
 
 function scoreSourceFor(key, configured) {
-  if (configured.has(key)) return 'baseline';
+  const modelId = modelIdFromKey(key);
+  if (PINNED_MODELS.has(key) || PINNED_MODELS.has(modelId)) return 'pinned';
+  if (explicitScore(key) !== null) return 'baseline';
+  if (configured?.has(key)) return 'baseline';
   const slug = keySlug(key);
-  for (const configuredKey of configured) {
-    if (keySlug(configuredKey) === slug) return 'baseline';
+  if (configured) {
+    for (const configuredKey of configured) {
+      if (keySlug(configuredKey) === slug) return 'baseline';
+    }
   }
-  const modelId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : key;
-  const evaluated = Number(modelEvaluations[modelId]?.score);
-  if (Number.isFinite(evaluated)) return 'evaluation';
   if (sweBenchScoreFor(SWE_BENCH_SCORES, modelId) !== null) return 'swe-bench';
-  return 'evaluation';
+  return 'unranked';
 }
 
 function groupRank(group, configuredSet, configuredIndex) {
   let pinned = false;
   let pinIndex = Number.POSITIVE_INFINITY;
   let configuredIdx = Number.POSITIVE_INFINITY;
-  let configuredKey = '';
-  let evalScore = -1;
-  let explicit = null;
+  let score = -1;
   for (const { candidate, originalIndex } of group.members) {
     const key = candidateKey(candidate);
     if (PINNED_MODELS.has(key) || PINNED_MODELS.has(candidate.model)) {
@@ -854,33 +813,19 @@ function groupRank(group, configuredSet, configuredIndex) {
     }
     if (configuredSet.has(key) && configuredIndex.get(key) < configuredIdx) {
       configuredIdx = configuredIndex.get(key);
-      configuredKey = key;
     }
-    const override = explicitScore(key);
-    if (override !== null && (explicit === null || override > explicit)) explicit = override;
-    const evaluated = Number(modelEvaluations[candidate.model]?.score);
-    if (Number.isFinite(evaluated)) evalScore = Math.max(evalScore, evaluated);
+    score = Math.max(score, capabilityScore(key));
   }
   for (const [key, index] of configuredIndex) {
     if (keySlug(key) !== group.slug || index >= configuredIdx) continue;
     configuredIdx = index;
-    configuredKey = key;
   }
-  const base = pinned
-    ? Number.POSITIVE_INFINITY
-    : configuredIdx !== Number.POSITIVE_INFINITY
-      ? configuredScore(configuredKey, configuredIdx)
-      : explicit !== null
-        ? explicit
-        : evalScore;
-  let score = base;
-  if (!pinned && Number.isFinite(base) && base >= 0) {
-    const adjustments = group.members.map(({ candidate }) =>
-      usageAdjustment(candidateKey(candidate)),
-    );
-    score = base + (adjustments.length ? Math.max(...adjustments) : 0);
+  if (pinned) return { pinned: true, score: Number.POSITIVE_INFINITY, tie: pinIndex };
+  // A saved route order is a manual override. Keep it above any SWE %.
+  if (configuredIdx !== Number.POSITIVE_INFINITY) {
+    return { pinned: false, score: 1000 - configuredIdx, tie: group.firstIndex };
   }
-  return { pinned, score, tie: pinned ? pinIndex : group.firstIndex };
+  return { pinned: false, score, tie: group.firstIndex };
 }
 
 function orderByModelThenProvider(candidates, configuredSet, configuredIndex) {
@@ -1076,9 +1021,8 @@ async function evaluateModel(target) {
     });
   }
 
-  // Weights total 65 so scores stay on the same scale as the configured
-  // baseline anchors. The last three items carry most of the discrimination;
-  // the earlier ones are saturated by every competent model.
+  // Diagnostic only. Ranking uses unofficial SWE-bench percentages, not
+  // this puzzle, catalog metadata, or a single latency sample.
   const answers = parseEvaluationAnswers(evaluationText(result.payload));
   let benchmarkScore = 0;
   if (answers) benchmarkScore += 3;
@@ -1093,8 +1037,6 @@ async function evaluateModel(target) {
   if (Number(answers?.modpow) === 49) benchmarkScore += 8;
 
   const modelMetadataScore = metadataScore(candidateMetadata(candidate));
-  // Deliberately small: this is a single cold sample and used to swing the
-  // ranking more than any capability signal did.
   const latencyScore = latencyMs <= 5000 ? 6 : latencyMs <= 15000 ? 4 : latencyMs <= 30000 ? 2 : 0;
   const score = Math.round((benchmarkScore + modelMetadataScore + latencyScore) * 10) / 10;
   return {
@@ -1184,6 +1126,20 @@ async function keepWorkingCatalogModels(ids, providerName) {
   return { kept, failed, reached, probed: ids.length };
 }
 
+function probeFailureIsInconclusive(reason, providerName = '') {
+  const text = String(reason || '');
+  if (/timeout/i.test(text) || /missing key/i.test(text)) return true;
+  const status = Number((text.match(/HTTP (\d+)/i) || [])[1]);
+  if (status >= 500) return true;
+  if (status !== 429) return false;
+  const name = String(providerName).includes(':')
+    ? String(providerName).slice(0, String(providerName).indexOf(':'))
+    : String(providerName);
+  // A priced catalog 429 during a probe burst is rate limiting. An unpriced
+  // 429 is often "no free tier" (B.AI / TokenRouter).
+  return Boolean(PROVIDERS.get(name)?.catalogHasPricing);
+}
+
 function shouldLiveProbeCatalog(provider) {
   if (!provider?.usesCatalog || !registry.hasUsableKey(provider)) return false;
   if (!provider.catalog?.size || provider.catalogError) return false;
@@ -1193,17 +1149,25 @@ function shouldLiveProbeCatalog(provider) {
 }
 
 function providerAddsDiscoveredModels(provider) {
-  // Live-probed catalogs insert keepers themselves. Native listings skip a
-  // re-probe on a cached verdict, so they need this promotion.
-  if (!provider?.probeFreeTier || !registry.hasUsableKey(provider) || !provider.catalog?.size) {
-    return false;
-  }
-  return !shouldLiveProbeCatalog(provider);
+  if (!registry.hasUsableKey(provider) || !provider.catalog?.size) return false;
+  if (provider.catalogHasPricing) return provider.discover !== false;
+  if (!provider.probeFreeTier) return false;
+  // Native listings skip a re-probe on a cached verdict, so they need this
+  // promotion. Live-probed unpriced catalogs insert keepers themselves.
+  return Boolean(provider.modelsUrl);
 }
 
 function catalogVerdict(providerName, modelId) {
   for (const key of verdictKeysFor(providerName, modelId)) {
     const verdict = verdictFor(key);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
+function rawVerdict(providerName, modelId) {
+  for (const key of verdictKeysFor(providerName, modelId)) {
+    const verdict = modelVerdicts[key];
     if (verdict) return verdict;
   }
   return null;
@@ -1241,7 +1205,14 @@ function adoptKnownFreeCatalogModels() {
       ) {
         continue;
       }
-      if (catalogVerdict(provider.name, model.id)?.free !== true) continue;
+      const raw = rawVerdict(provider.name, model.id);
+      if (raw?.free === false && !probeFailureIsInconclusive(raw.reason, provider.name)) continue;
+      if (provider.catalogHasPricing) {
+        if (!isZeroCost(model)) continue;
+        if (!(raw?.free === false && probeFailureIsInconclusive(raw.reason, provider.name))) continue;
+      } else if ((verdictFor(`${provider.name}:${model.id}`) || catalogVerdict(provider.name, model.id))?.free !== true) {
+        continue;
+      }
       discoveredModelIds.push(labeled);
       adopted.push(labeled);
     }
@@ -1307,21 +1278,44 @@ async function discoverLiveProvider(provider, configuredRoute) {
       return { excluded, seen: freeIds, additions: [], removed: [], skipped: true };
     }
     reachable = new Set(probed.kept);
-    for (const id of probed.kept) {
-      for (const key of verdictKeysFor(providerName, id)) {
-        setModelVerdict(key, { free: true, reason: 'probe 200 unpaid' });
-      }
-    }
-    for (const item of probed.failed) {
-      for (const key of verdictKeysFor(providerName, item.id)) {
-        setModelVerdict(key, { free: false, reason: `probe failed: ${item.reason}` });
-      }
-    }
-    if (probed.failed.length) {
+    const inconclusive = probed.failed.filter((item) =>
+      probeFailureIsInconclusive(item.reason, providerName),
+    );
+    const definitive = probed.failed.filter(
+      (item) => !probeFailureIsInconclusive(item.reason, providerName),
+    );
+    if (probed.kept.length === 0 && definitive.length === 0 && probed.reached > 0) {
+      // Every probe was 429/5xx/timeout. That is congestion, not "this id is
+      // paid". Keep (or restore) the catalog's free listings instead of wiping
+      // the provider off the route.
       log(
-        `dropped ${probed.failed.length} ${providerName} model(s) that did not serve a free chat`,
+        `${providerName} discovery probes inconclusive; keeping catalog free models`,
         probed.failed.map((item) => item.id),
       );
+      reachable = new Set(freeIds.filter((id) => !excluded.has(id)));
+    } else {
+      for (const id of probed.kept) {
+        for (const key of verdictKeysFor(providerName, id)) {
+          setModelVerdict(key, { free: true, reason: 'probe 200 unpaid' });
+        }
+      }
+      for (const item of definitive) {
+        for (const key of verdictKeysFor(providerName, item.id)) {
+          setModelVerdict(key, { free: false, reason: `probe failed: ${item.reason}` });
+        }
+      }
+      if (definitive.length) {
+        log(
+          `dropped ${definitive.length} ${providerName} model(s) that did not serve a free chat`,
+          definitive.map((item) => item.id),
+        );
+      }
+      if (inconclusive.length) {
+        log(
+          `left ${inconclusive.length} ${providerName} model(s) unranked; probe was inconclusive`,
+          inconclusive.map((item) => item.id),
+        );
+      }
     }
   }
 
@@ -2113,11 +2107,9 @@ function routeStatus() {
         provider: candidate.provider,
         id: candidate.model,
         pinned,
-        score: pinned
-          ? null
-          : rankedModelScore(key, configuredSet, configuredIndex),
-        baseScore: pinned ? null : baseModelScore(key, configuredSet, configuredIndex),
-        scoreAdjustment: pinned ? 0 : usageAdjustment(key),
+        score: pinned ? null : rankedModelScore(key),
+        baseScore: pinned ? null : baseModelScore(key),
+        scoreAdjustment: 0,
         scoreSource: scoreSourceFor(key, configuredSet),
         // Only meaningful where the catalog publishes prices; elsewhere the
         // freeModels allowlist is the guarantee, so report it as free.
@@ -2380,6 +2372,8 @@ function uiRouteState() {
     provider: entry.provider,
     model: entry.id,
     pinned: entry.pinned,
+    score: entry.score,
+    scoreSource: entry.scoreSource,
     zeroCost: entry.zeroCost,
     cooldownSeconds: entry.cooldownSeconds,
     scoreAdjustment: entry.scoreAdjustment,

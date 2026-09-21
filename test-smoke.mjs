@@ -58,8 +58,19 @@ assert.equal(normalizeModelSlug('acme/extra-1:free'), 'extra-1');
   assert.equal(sweBenchScoreFor(scores, 'nvidia/nemotron-3-super-120b-a12b:free'), 60.5);
   assert.equal(sweBenchScoreFor(scores, 'openrouter:nvidia/nemotron-3-super-120b-a12b'), 60.5);
   assert.equal(sweBenchScoreFor(scores, 'z-ai/glm5'), 77.8);
-  assert.equal(sweBenchScoreFor(scores, 'glm-5.3-flash'), null);
+  assert.equal(sweBenchScoreFor(scores, 'z-ai/glm-5.2:free'), 77.8);
+  assert.equal(sweBenchScoreFor(scores, 'glm-5.3-flash'), 77.8);
+  assert.equal(sweBenchScoreFor(scores, 'gemini-3.8-flash'), 80.0);
+  assert.equal(sweBenchScoreFor(scores, 'gemini:gemini-3.7-flash'), 80.8);
+  assert.equal(sweBenchScoreFor(scores, 'google/gemini-3.8-flash:free'), 80.0);
+  assert.equal(sweBenchScoreFor(scores, 'gemini-3.5-flash'), 78.8);
+  assert.equal(sweBenchScoreFor(scores, 'gemini-3.5-flash-lite'), 75.0);
+  assert.equal(sweBenchScoreFor(scores, 'gemini-3.6-flash'), 79.6);
+  assert.equal(sweBenchScoreFor(scores, 'qwen/qwen3.8-27b:free'), 86.0);
+  assert.equal(sweBenchScoreFor(scores, 'nex-agi/nex-n2.5-pro:free'), 80.8);
+  assert.equal(sweBenchScoreFor(scores, 'google/gemma-4-31b-it:free'), 52.0);
   assert.equal(sweBenchScoreFor(scores, 'hy3'), null);
+  assert.equal(sweBenchScoreFor(scores, 'gemma-4-26b-a4b-it'), null);
 }
 
 {
@@ -1258,21 +1269,19 @@ try {
     health.routes['test-route'].some((entry) => entry.id === 'mock-domain'),
     false,
   );
-  // mock-new aces the benchmark but the low latency weight no longer lets it
-  // leapfrog mock-a, whose configured anchor score is 90. The quotamock pair
-  // is still present here: nothing has asked them anything yet.
+  // Pins first, then the saved route order, then discovered models by SWE.
   assert.deepEqual(
     health.routes['test-route'].map((entry) => `${entry.provider}:${entry.id}`),
     [
       'tokenrouter:z-ai/glm-5.3-free',
       'bai:glm-5.3-flash',
       'openrouter:mock-a',
-      'openrouter:mock-new',
       'extra:extra-1',
       'openrouter:acme/extra-1:free',
       'quotamock:no-free-tier',
       'quotamock:daily-exhausted',
       'bai:models/glm-5.3-pro',
+      'openrouter:mock-new',
     ],
   );
   const mockNewEvaluation = health.discovery.evaluations['mock-new'];
@@ -1747,16 +1756,18 @@ try {
   const routeByKey = new Map(
     usageHealth.routes['test-route'].map((entry) => [`${entry.provider}:${entry.id}`, entry]),
   );
-  // extra:extra-1 served 1 useful reply and 1 empty, so reliability drags its
-  // score down by the full clamped weight. A 429 would not.
+  // extra:extra-1 served 1 useful reply and 1 empty. Usage is recorded but
+  // no longer moves the rank; capability score stays SWE / unranked.
   const extraEntry = routeByKey.get('extra:extra-1');
-  assert.equal(extraEntry.baseScore, 82);
-  assert.equal(extraEntry.scoreAdjustment, -12);
-  assert.equal(extraEntry.score, 70);
-  // Pinned models are exempt from reliability adjustment.
+  assert.equal(extraEntry.baseScore, -1);
+  assert.equal(extraEntry.scoreAdjustment, 0);
+  assert.equal(extraEntry.score, -1);
+  assert.equal(extraEntry.scoreSource, 'baseline');
+  assert.equal(routeByKey.get('bai:models/glm-5.3-pro').score, 77.8);
+  assert.equal(routeByKey.get('bai:models/glm-5.3-pro').scoreSource, 'swe-bench');
+  assert.equal(routeByKey.get('openrouter:mock-new').score, -1);
+  // Pinned models are exempt from the numeric rank.
   assert.equal(routeByKey.get('bai:glm-5.3-flash').scoreAdjustment, 0);
-  // A group is ranked by its best provider, so the sibling's clean record keeps
-  // the pair in place instead of the whole model sinking.
   assert.equal(routeByKey.get('openrouter:acme/extra-1:free').scoreAdjustment, 0);
   // Both quotamock models answered 429 earlier, yet only the one with no free
   // allowance is gone. The exhausted one is still a free model and comes back
@@ -1767,11 +1778,11 @@ try {
       'tokenrouter:z-ai/glm-5.3-free',
       'bai:glm-5.3-flash',
       'openrouter:mock-a',
-      'openrouter:mock-new',
       'extra:extra-1',
       'openrouter:acme/extra-1:free',
       'quotamock:daily-exhausted',
       'bai:models/glm-5.3-pro',
+      'openrouter:mock-new',
     ],
   );
 
