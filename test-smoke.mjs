@@ -31,6 +31,7 @@ import {
   rememberSignaturesFromPayload,
 } from './thought-signature.mjs';
 import { displayPath, maskSecret, validateSecret } from './ui.mjs';
+import { loadSweBenchScores, sweBenchScoreFor } from './swe-bench.mjs';
 import {
   addMissingKeys,
   buildLiveConfig,
@@ -50,6 +51,15 @@ assert.match(PACKAGE_VERSION, /^\d+\.\d+\.\d+$/);
 assert.equal(normalizeModelSlug('google/gemini-3.8-flash:free'), 'gemini-3.8-flash');
 assert.equal(normalizeModelSlug('gemini-3.8-flash'), 'gemini-3.8-flash');
 assert.equal(normalizeModelSlug('acme/extra-1:free'), 'extra-1');
+
+{
+  const scores = loadSweBenchScores(path.join(path.dirname(fileURLToPath(import.meta.url)), 'swe-bench.json'));
+  assert.equal(sweBenchScoreFor(scores, 'nvidia/nemotron-3-super-120b-a12b:free'), 60.5);
+  assert.equal(sweBenchScoreFor(scores, 'openrouter:nvidia/nemotron-3-super-120b-a12b'), 60.5);
+  assert.equal(sweBenchScoreFor(scores, 'z-ai/glm5'), 77.8);
+  assert.equal(sweBenchScoreFor(scores, 'glm-5.3-flash'), null);
+  assert.equal(sweBenchScoreFor(scores, 'hy3'), null);
+}
 
 {
   process.env.TEST_MULTI_API_KEY = ' duplicate ';

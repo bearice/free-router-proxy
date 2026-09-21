@@ -43,6 +43,7 @@ import {
   rememberSignaturesFromPayload,
 } from './thought-signature.mjs';
 import { displayPath, maskSecret, renderPage, updateEnvFile, validateSecret } from './ui.mjs';
+import { loadSweBenchScores, sweBenchScoreFor } from './swe-bench.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = JSON.parse(fs.readFileSync(path.join(HERE, 'package.json'), 'utf8')).version;
@@ -200,6 +201,7 @@ const EVALUATION_MAX_PER_RUN = Math.max(1, Number(evaluationConfig.maxPerRun || 
 const RANK_USAGE_WEIGHT = Math.max(0, Number(evaluationConfig.usageWeight ?? 12));
 const RANK_USAGE_MIN_REQUESTS = Math.max(1, Number(evaluationConfig.usageMinRequests || 20));
 const PINNED_MODELS = new Set(evaluationConfig.pinnedModels || []);
+const SWE_BENCH_SCORES = loadSweBenchScores(path.join(HERE, 'swe-bench.json'));
 const usageConfig = config.usage || {};
 const USAGE_RETENTION_DAYS = Math.max(1, Number(usageConfig.retentionDays || 7));
 const USAGE_TIMEZONE = String(usageConfig.timezone || '');
@@ -785,7 +787,9 @@ function baseModelScore(key, configured, configuredIndex) {
   const explicit = explicitScore(key);
   if (explicit !== null) return explicit;
   const evaluated = Number(modelEvaluations[modelId]?.score);
-  return Number.isFinite(evaluated) ? evaluated : -1;
+  if (Number.isFinite(evaluated)) return evaluated;
+  const swe = sweBenchScoreFor(SWE_BENCH_SCORES, modelId);
+  return swe !== null ? swe : -1;
 }
 
 function rankedModelScore(key, configured, configuredIndex) {
@@ -800,6 +804,10 @@ function scoreSourceFor(key, configured) {
   for (const configuredKey of configured) {
     if (keySlug(configuredKey) === slug) return 'baseline';
   }
+  const modelId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : key;
+  const evaluated = Number(modelEvaluations[modelId]?.score);
+  if (Number.isFinite(evaluated)) return 'evaluation';
+  if (sweBenchScoreFor(SWE_BENCH_SCORES, modelId) !== null) return 'swe-bench';
   return 'evaluation';
 }
 
