@@ -169,7 +169,7 @@ const registry = createProviderRegistry(config, { host: HOST, port: PORT });
 const PROVIDERS = registry.providers;
 const discoveryConfig = config.discovery || {};
 let discoveryEnabled = discoveryConfig.enabled !== false;
-const DISCOVERY_INTERVAL_MS = Number(discoveryConfig.intervalMs || 7 * 24 * 60 * 60 * 1000);
+const DISCOVERY_INTERVAL_MS = Number(discoveryConfig.intervalMs || 2 * 60 * 60 * 1000);
 const DISCOVERY_ROUTE = String(discoveryConfig.route || 'free-best');
 // How long a "not free" verdict stands before the model is worth asking again.
 const VERDICT_RETRY_MS = Number(discoveryConfig.verdictRetryMs || DISCOVERY_INTERVAL_MS);

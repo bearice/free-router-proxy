@@ -589,7 +589,7 @@ export function defaultConfigObject() {
     },
     discovery: {
       enabled: true,
-      intervalMs: 172800000,
+      intervalMs: 7200000,
       route: 'free-best',
       stateFile: 'discovered-free-models.json',
       exclude: {
